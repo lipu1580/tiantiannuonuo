@@ -10,5 +10,23 @@ module sample_tick_gen #(
     input  logic rst_n,   // 低有效复位
     output logic audio_ce // 每个音频采样周期拉高一拍
 );
-    // TODO: 实现采样使能生成。
+    logic [24:0] accumulator; //累加器，用于长期稳定采集率在48KHz
+    always_ff @( posedge sys_clk ) begin : Bresenham
+        if (!rst_n) begin
+            audio_ce <= 1'b0;
+            accumulator <= 25'b0;
+        end else begin
+            if (accumulator + SAMPLE_RATE >= SYS_CLK_HZ) begin
+                accumulator <= accumulator + SAMPLE_RATE - SYS_CLK_HZ;
+                audio_ce <= 1'b1;
+            end else begin
+                accumulator <= accumulator + SAMPLE_RATE;
+                audio_ce <= 1'b0;
+            end 
+        end
+    end
 endmodule
+
+//27000000 / 48000 = 562.5 个 sys_clk 周期
+//这里出现了小数，不能每次都固定等待562个或563个时钟周期
+//所以使用了Bresenham累加法使采集率在长期来看是稳定在48KHz

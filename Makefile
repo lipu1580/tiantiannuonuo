@@ -12,11 +12,14 @@ suffix := .sv
 RTL_FILE = $(addsuffix $(suffix), $(RTL_NAME))
 TB_FILE = $(addsuffix $(suffix), $(TB_NAME))
 
-VFLAGS = --binary --timing --Wall
+VFLAGS = --binary --timing 
 
-.PHONY: tick
+.PHONY: tick clean
 
 tick:
-	$(VERILATOR) $(VFLAGS) --top-module $(TB_NAME) --Mdir $(BUILF_DIR) $(RTL_DIR)/$(RTL_FILE) $(TB_DIR)/$(TB_FILE) $(BUILF_DIR)/V$(TB_NAME)
+	mkdir -p $(BUILF_DIR)
+	$(VERILATOR) $(VFLAGS) --top-module $(TB_NAME) --Mdir $(BUILF_DIR) $(RTL_DIR)/$(RTL_FILE) $(TB_DIR)/$(TB_FILE)
+	$(BUILF_DIR)/V$(TB_NAME)
 
-
+clean:
+	rm -rf build

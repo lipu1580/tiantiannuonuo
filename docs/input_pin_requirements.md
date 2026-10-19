@@ -116,13 +116,38 @@ key_row[3] ──┴── K12 ─────── K13 ─────── K
 |---|---|---|
 | CH0 | FSR402 | `FSR_ADC_CHANNEL=0` |
 | CH1 | 电位器 | `POT_ADC_CHANNEL=1` |
-| CH2~CH7 | 预留 | 可扩展第二 FSR、滑音条等 |
+| CH2~CH6 | 5 路压电峰值 | 每路独立峰值保持 + 复位 |
+| CH7 | 备用 | 可扩展第二 FSR、滑音条等 |
+
+> 该映射与当前 `project_params.svh` 和 testbench 一致。若改用
+> `docs/device_Info_path.md` 的“CH0~CH4 压电”方案，必须同步修改 RTL 常量和
+> 采样调度，详见 `docs/hardware_list.md` 第 6 节。
 
 ### 3.3 采样节奏
 
 - FSR 与电位器交替采样，每个通道约 1.4 kHz。
 - 单次 I2C 事务约 100 us（400 kHz）。
 - 每次事务完成后等待 `SAMPLE_INTERVAL`（默认 250 us）再采样下一个通道。
+- 扩展到 7 通道（5 压电 + FSR + 电位器）时，建议把 `SAMPLE_INTERVAL` 降到
+  20~50 us，一轮扫描约 1~1.5 ms；压电峰值保持电路保证不会漏掉短脉冲。
+
+### 3.4 压电输入（5 路）
+
+压电片受迫时可能输出 ±几十伏的短脉冲，**不能直接接 ADS7830 或 FPGA**。
+每路必须加：
+
+```text
+压电片 → 1kΩ 串联 → BAT54S 钳位到 0/3.3V → 3.3V TVS/Zener
+       → 1nF 到地 → BAT85 峰值检波 → 100nF 保持 → 100Ω → ADS7830 CHx
+```
+
+具体要求见 `docs/hardware_list.md` 第 4 节。关键点：
+
+- 压电片两端并 1 MΩ 泄放；
+- 钳位必须在连接器/面包板入口处；
+- 5 路峰值保持电容互相独立；
+- 峰值电容由 FPGA GPIO 控制 2N7002 放电后再进行下一次触发；
+- 不要用电感去“中和”压电尖峰，电感会与压电片电容谐振。
 
 ---
 
@@ -201,6 +226,8 @@ ADC 原始值
 4. 所有输入引脚分配在同一 bank，避免跨 bank 电平不匹配。
 5. 调试信号若引脚不足，可只保留 `key_down[3:0]`、`adc_bus_error`、
    `input_overflow`。
+6. 压电片信号进入 FPGA/ADC 前必须先经过限流+钳位，见
+   `docs/hardware_list.md` 第 4 节。
 
 ---
 

@@ -1,28 +1,47 @@
 //=============================================================================
 // 文件   : input_event_stub.sv
 // 功能   : 无按键/无 ADC 时的固定演示事件源，用于成员 1/3 提前联调。
-// 说明   :
-//   1. 严格遵守 event_valid/event_ready 握手；未握手成功时字段保持不变。
-//   2. test_pattern 选择不同序列：
-//        0 = 四音和弦（C4/E4/G4/C5），默认
-//        1 = 音阶琶音
-//        2 = 单音重复（延迟测试）
-//        3 = ALL_NOTES_OFF 压力测试
-//   3. 所有序列循环播放；切换 test_pattern 会从 0 ms 重新开始。
-//   4. 本模块只产生事件，不产生 PCM，也不能绕过成员 1 的 audio_core。
+//
+// 【为什么需要它】
+//   成员 1 的 audio_core 和成员 3 的 I2S 可以不等真实按键/FSR 就开工：
+//   把本模块产生的事件接到 audio_core，就能验证 4 路复音、ADSR、混音。
+//
+// 【输出协议】
+//   与真实按键完全相同：event_valid/event_ready 握手，event_type 编码
+//   来自 audio_defs.svh。未握手成功时，所有字段保持不变。
+//
+// 【时间轴】
+//   内部用 1 ms tick 计时，序列项格式：
+//     {time_ms[15:0], type[1:0], note[6:0], velocity[7:0]}
+//   当前时刻 t_ms >= 表项时间且上游 ready 时，发出该事件。
+//   同一时间戳的多个事件会背靠背连续发出（每拍一个）。
+//
+// 【test_pattern】
+//   0 = 四音和弦 C4/E4/G4/C5（默认）
+//   1 = 8 音琶音
+//   2 = 单音重复（延迟测试）
+//   3 = 多音 + ALL_NOTES_OFF 压力测试
+//   切换 pattern 会从 0 ms 重新开始。
+//
+// 【重要】
+//   成员 1 的 audio_core 内部也有 audio_test_source。上板时两套测试源
+//   只能二选一：用本模块时 audio_core.test_mode 必须为 0。
+//   本模块只产生事件，不产生 PCM，也不能绕过 audio_core。
 //=============================================================================
 `include "project_params.svh"
 `include "audio_defs.svh"
 
 module input_event_stub #(
-    parameter integer SYS_CLK_HZ = `SYS_CLK_HZ,
-    parameter logic [7:0] TEST_VELOCITY = 8'd180
+    parameter integer SYS_CLK_HZ = `SYS_CLK_HZ,        // 系统时钟
+    parameter logic [7:0] TEST_VELOCITY = 8'd180       // 默认测试力度
 )(
     input  logic       sys_clk,
     input  logic       rst_n,
 
+    // 测试序列选择
     input  logic [1:0] test_pattern,
 
+    // 标准演奏事件输出
     output logic       event_valid,
     input  logic       event_ready,
     output logic [1:0] event_type,
@@ -32,11 +51,13 @@ module input_event_stub #(
 
     //-------------------------------------------------------------------------
     // 1 ms 时基
+    //   MS_DIV = 27e6/1000 = 27000 拍；ms_tick 每 27000 拍高 1 拍。
+    //   仿真时把 SYS_CLK_HZ 调小，序列会跑得很快。
     //-------------------------------------------------------------------------
     localparam integer MS_DIV = (SYS_CLK_HZ / 1000 < 1) ? 1 : SYS_CLK_HZ / 1000;
 
-    logic [15:0] ms_div;
-    logic        ms_tick;
+    logic [15:0] ms_div;    // 分频计数器
+    logic        ms_tick;   // 1 ms 脉冲
 
     always_ff @(posedge sys_clk) begin
         if (!rst_n) begin
@@ -53,7 +74,13 @@ module input_event_stub #(
 
     //-------------------------------------------------------------------------
     // 序列表
-    // entry = {time_ms[15:0], type[1:0], note[6:0], velocity[7:0]}
+    //   entry = {time_ms[15:0], type[1:0], note[6:0], velocity[7:0]}  // 33 位
+    //   位段：
+    //     entry[32:17] = 绝对时间（ms）
+    //     entry[16:15] = 事件类型
+    //     entry[14:8]  = MIDI 音符
+    //     entry[7:0]   = 力度
+    //   seq_len 是当前 pattern 的序列长度（表项数），seq_idx 是当前项。
     //-------------------------------------------------------------------------
     logic [32:0] entry;
     logic [4:0]  seq_len;
@@ -64,6 +91,11 @@ module input_event_stub #(
         seq_len = 5'd1;
 
         case (test_pattern)
+            //-----------------------------------------------------------------
+            // pattern 0：四音和弦
+            //   100/200/300/400 ms 依次按下 C4/E4/G4/C5，
+            //   1000~1300 ms 依次释放，1500 ms ALL_NOTES_OFF。
+            //   用于验证 4 路复音和 ADSR。
             //-----------------------------------------------------------------
             2'd0: begin
                 seq_len = 5'd9;
@@ -81,6 +113,9 @@ module input_event_stub #(
                 endcase
             end
 
+            //-----------------------------------------------------------------
+            // pattern 1：8 音琶音
+            //   每 150 ms 上一个音，C4 到 C5；1550 ms 起依次释放。
             //-----------------------------------------------------------------
             2'd1: begin
                 seq_len = 5'd16;
@@ -106,6 +141,9 @@ module input_event_stub #(
             end
 
             //-----------------------------------------------------------------
+            // pattern 2：单音重复
+            //   200 ms ON、400 ms OFF，用于测量按键/事件到音频的延迟。
+            //-----------------------------------------------------------------
             2'd2: begin
                 seq_len = 5'd6;
                 case (seq_idx)
@@ -119,6 +157,10 @@ module input_event_stub #(
                 endcase
             end
 
+            //-----------------------------------------------------------------
+            // pattern 3：多音 + ALL_NOTES_OFF 压力测试
+            //   同一时间戳连续 4 个 NOTE_ON，随后 ALL_OFF；再重复一次。
+            //   用于验证事件 FIFO 和 ALL_OFF 优先级。
             //-----------------------------------------------------------------
             default: begin
                 seq_len = 5'd10;
@@ -141,11 +183,15 @@ module input_event_stub #(
 
     //-------------------------------------------------------------------------
     // 发送状态机
+    //   - 每拍最多输出 1 个事件；
+    //   - 未握手成功时 valid_r/字段保持不变；
+    //   - 握手成功后 seq_idx 前进；走到表尾则回绕到 0 并重置 t_ms；
+    //   - test_pattern 变化时立即重启序列。
     //-------------------------------------------------------------------------
-    logic [1:0]  pattern_d;
-    logic [15:0] t_ms;
-    logic        valid_r;
-    logic [1:0]  type_r;
+    logic [1:0]  pattern_d;  // 上一拍 pattern，用于检测切换
+    logic [15:0] t_ms;       // 序列内部毫秒计数
+    logic        valid_r;    // 输出事件有效
+    logic [1:0]  type_r;     // 输出事件字段
     logic [6:0]  note_r;
     logic [7:0]  vel_r;
 
@@ -159,6 +205,7 @@ module input_event_stub #(
             note_r     <= 7'd0;
             vel_r      <= 8'd0;
         end else if (test_pattern != pattern_d) begin
+            // pattern 切换：从 0 ms 重新开始
             pattern_d <= test_pattern;
             seq_idx   <= '0;
             t_ms      <= 16'd0;
@@ -169,14 +216,16 @@ module input_event_stub #(
             end
 
             if (valid_r && event_ready) begin
+                // 握手成功：本事件完成，下一拍取下一条
                 valid_r <= 1'b0;
                 if ((seq_idx + 1'b1) >= seq_len) begin
                     seq_idx <= '0;
-                    t_ms    <= 16'd0;
+                    t_ms    <= 16'd0;   // 整段循环
                 end else begin
                     seq_idx <= seq_idx + 1'b1;
                 end
             end else if (!valid_r) begin
+                // 没有待发事件：时间到了就锁存下一条并置 valid
                 if (t_ms >= entry[32:17]) begin
                     valid_r <= 1'b1;
                     type_r  <= entry[16:15];

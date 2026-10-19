@@ -55,8 +55,12 @@ ADS7830 ADC ──┘                 └► expr_*  (expression/pitch_bend/wave
 ├── docs/
 │   ├── input_interface.md          # 接口与握手详细说明
 │   ├── input_pin_requirements.md   # 给成员 3 的引脚/电气需求
+│   ├── hardware_list.md            # 更新版硬件清单（压电保护/调理/电源）
 │   ├── key_map.md                  # 按键映射表
 │   ├── integration_guide.md        # 与 audio_core 的最小联调示例
+│   ├── member2_scope.md            # 成员 2 最终职责、接口与待实现项
+│   ├── remaining_tasks.md          # 未实现/未覆盖项盘点（P0/P1/P2）
+│   ├── 仍未完成的功能详情.md        # 逐项：现状/目标/缺失/验收/测试
 │   └── test_record.md              # 仿真记录与硬件测试清单
 ├── Makefile
 └── README.md
@@ -167,6 +171,8 @@ assign adc_sda_i = adc_sda;
 - [x] 无硬件 `input_event_stub` 演示序列
 - [x] 7 个 testbench 全部通过
 - [ ] 实物接线与引脚约束（成员 3）
+- [ ] 5 路压电输入调理 + 峰值检测 RTL
+- [ ] 7 通道 ADC 调度（5 压电 + FSR + 电位器）
 - [ ] 与成员 1 `audio_core` 上板联调
 - [ ] 端到端延迟实测
 

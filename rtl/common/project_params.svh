@@ -30,6 +30,9 @@
 `define ADC_SAMPLE_INTERVAL_US 250         // 每个通道的采样间隔
 `define FSR_ADC_CHANNEL       3'd0         // ADS7830 CH0 接 FSR
 `define POT_ADC_CHANNEL       3'd1         // ADS7830 CH1 接电位器
+// 压电扩展（当前 RTL 尚未实现，硬件按 docs/hardware_list.md 接线）：
+//   CH2~CH6 = 5 路压电峰值，CH7 = 备用。
+//   实现时需要把 ADC 调度扩到 7 通道，并增加 piezo_peak 模块。
 `define FSR_FILTER_SHIFT      2            // 指数滤波 alpha = 1/4
 `define FSR_NOISE_GATE        8'd6         // FSR 噪声门限
 `define NOTE_BASE_C4          7'd60        // 默认起始音符 C4

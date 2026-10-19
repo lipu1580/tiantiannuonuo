@@ -150,6 +150,11 @@ assign adc_sda_i = adc_sda;
    （每片 8 通道）或增加模拟多路复用。`fsr_filter` 与事件译码接口不需要
    改变，只需把力度来源改为当前按键对应的 ADC 通道。
 
+6. **成员 1 的 `audio_core` 内部也有测试音源。**
+   上板联调时 `input_top.test_mode` 与 `audio_core.test_mode` 只能二选一：
+   用成员 2 的固定序列时前者置 1、后者置 0；用成员 1 自己的测试音源时相反。
+   详见 `docs/integration_guide.md` 第 3.1 节。
+
 ---
 
 ## 6. 当前状态

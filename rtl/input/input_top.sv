@@ -15,10 +15,10 @@
 `include "audio_defs.svh"
 
 module input_top #(
-    parameter integer SYS_CLK_HZ       = `SYS_CLK_HZ,
-    parameter integer ROW_COUNT        = `KEY_ROW_COUNT,
-    parameter integer COL_COUNT        = `KEY_COL_COUNT,
-    parameter integer KEY_COUNT        = ROW_COUNT * COL_COUNT,
+    parameter integer SYS_CLK_HZ       = `SYS_CLK_HZ,           //晶振主频
+    parameter integer ROW_COUNT        = `KEY_ROW_COUNT,        //行数
+    parameter integer COL_COUNT        = `KEY_COL_COUNT,        //列数
+    parameter integer KEY_COUNT        = ROW_COUNT * COL_COUNT, 
 
     // 扫描与消抖
     parameter integer ROW_DWELL_CYC    = SYS_CLK_HZ / (`MATRIX_FRAME_HZ * ROW_COUNT),

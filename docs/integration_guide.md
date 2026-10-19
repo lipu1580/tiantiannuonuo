@@ -1,7 +1,7 @@
 # 与成员 1 / 成员 3 的联调示例
 
 本文件给出一个最小顶层连接示例，用于：
-1. 成员 1 在没有真实按键时，用 `test_mode=1` 验证 4 路复音；
+1. 成员 1 在没有真实按键时，用 `input_top.test_mode=1` 注入固定事件验证 4 路复音；
 2. 成员 2 用 `input_event_stub` 先打通事件接口；
 3. 成员 3 把 `input_top` 与 `audio_core`、`i2s_tx` 接到同一个 `sys_clk`。
 
@@ -28,7 +28,7 @@ module tang_nano20k_top (
     output logic        adc_scl,
     inout  wire         adc_sda,
 
-    // 测试控制
+    // 成员 2 测试事件源选择（input_event_stub）
     input  logic        test_mode,
     input  logic [1:0]  test_pattern,
 
@@ -146,7 +146,9 @@ module tang_nano20k_top (
         .pcm_left       (pcm_left),
         .pcm_right      (pcm_right),
 
-        .test_mode      (test_mode),
+        // 使用成员 2 的事件源时，必须关闭成员 1 的内部测试音源，
+        // 否则两套事件会同时注入。详见第 3 节。
+        .test_mode      (1'b0),
         .test_pattern   (test_pattern),
 
         .active_voice_count (active_voice_count),
@@ -180,14 +182,15 @@ endmodule
 
 ## 2. 联调顺序
 
-1. **成员 1 自测**：`test_mode=1`，`test_pattern=0`，确认 4 个音符
+1. **成员 1 自测（用成员 2 的固定序列）**：`input_top.test_mode=1`、
+   `audio_core.test_mode=0`、`test_pattern=0`，确认 4 个音符
    C4/E4/G4/C5 依次触发，`active_voice_count` 达到 4。
 2. **成员 2 自测**：`event_ready` 固定为 1，按 K0~K11 检查
    `event_note_id`，按 K12 检查 ALL_NOTES_OFF。
 3. **成员 3 接通 I2S**：先把 `pcm_ready` 固定为 1，确认 PCM 数据变化；
    再接入 MAX98357A，听到测试音。
-4. **真实输入**：`test_mode=0`，按矩阵键；调整 FSR 力度，确认
-   `event_velocity` 随压力变化。
+4. **真实输入**：`input_top.test_mode=0`、`audio_core.test_mode=0`，
+   按矩阵键；调整 FSR 力度，确认 `event_velocity` 随压力变化。
 5. **表情**：旋转电位器，确认 `pitch_bend` 在 2048 附近到两端变化。
 6. **延迟测量**：用逻辑分析仪同时抓 `key_down[0]` 与 I2S 的
    `i2s_lrclk` 数据起点，测量按键到音频输出的总延迟，目标 ≤10 ms。
@@ -196,11 +199,33 @@ endmodule
 
 ## 3. 注意事项
 
+### 3.1 两套测试源不要同时打开
+
+工程里存在两套互相独立、但输出协议相同的测试事件源：
+
+| 测试源 | 位置 | 使能信号 |
+|---|---|---|
+| `input_event_stub` | 成员 2，`input_top` 内部 | `input_top.test_mode=1` |
+| `audio_test_source` | 成员 1，`audio_core` 内部 | `audio_core.test_mode=1` |
+
+两者都往事件总线上送 NOTE_ON/NOTE_OFF。上板联调时必须只启用其中一套：
+
+| 场景 | `input_top.test_mode` | `audio_core.test_mode` |
+|---|---|---|
+| 用成员 2 的固定序列测音频核心 | 1 | 0 |
+| 用成员 1 自己的测试音源 | 0 | 1 |
+| 真实按键演奏 | 0 | 0 |
+
+建议板级用两个独立拨码，或用一个 2 位模式选择信号分别驱动两端。
+本文示例默认采用“成员 2 测试源”，因此 `audio_core.test_mode` 固定为 0。
+
+### 3.2 其他注意事项
+
 - `audio_ce` 必须严格为 48 kHz。上面的累加器实现不会长期漂移。
 - `input_top` 与 `audio_core` 必须共用同一个 `sys_clk` 和 `rst_n`。
 - 事件 FIFO 深度为 8。若成员 1 长时间拉低 `event_ready`，请监控
   `input_overflow`。
-- `test_mode=1` 时真实按键事件会被排空丢弃，但 FSR/电位器仍在采样。
+- `input_top.test_mode=1` 时真实按键事件会被排空丢弃，但 FSR/电位器仍在采样。
 - ADS7830 的 SDA 必须在板级顶层接成双向，不能只接成 output。
 - 若成员 1 的 `audio_core` 端口名称有更新，以成员 1 的正式接口为准，
   但 `event_*` / `expr_*` 的位宽和编码不得改变。

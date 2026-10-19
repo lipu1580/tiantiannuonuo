@@ -6,8 +6,8 @@ RTL_DIR := rtl/audio
 TB_DIR := sim
 
 #目标与tb文件
-RTL_NAME := sample_tick_gen
-TB_NAME := tb_sample_tick_gen
+RTL_NAME := waveform_rom
+TB_NAME := tb_$(RTL_NAME)
 suffix := .sv
 RTL_FILE = $(addsuffix $(suffix), $(RTL_NAME))
 TB_FILE = $(addsuffix $(suffix), $(TB_NAME))

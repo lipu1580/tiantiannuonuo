@@ -63,12 +63,12 @@ module tb_sample_tick_gen;
     initial begin
         rst_n = 0;
         #(RESET_DURATION);
-        #1;
+        #1; //防止监视块和主激励块竞争
         rst_n = 1;
 
         repeat (40) @(posedge sys_clk);
         @(negedge sys_clk);
-        #1;
+        #1; //同上
 
         if (pulse_count < 11 || pulse_count > 13) begin
             $error("Expect:12, now: %0d ", pulse_count);

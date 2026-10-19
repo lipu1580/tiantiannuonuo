@@ -5,3 +5,9 @@
 *.vcd
 *.fst
 obj_dir/
+*.log
+
+# 编辑器
+.vscode/
+*.swp
+*~

@@ -1,0 +1,11 @@
+# 仿真输出
+build/
+*.vcd
+*.fst
+*.vvp
+*.log
+
+# 编辑器
+.vscode/
+*.swp
+*~

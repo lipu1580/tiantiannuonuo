@@ -116,7 +116,7 @@ module key_scan #(
     //   ROW_ACTIVE_LOW=1 时：无效=1，有效=0。
     //-------------------------------------------------------------------------
     always_comb begin
-        key_row = {ROW_COUNT{ROW_ACTIVE_LOW}};          // 全部为无效电平
+        key_row = {ROW_COUNT{ROW_ACTIVE_LOW}};          // 批量拼接全部为无效电平
         key_row[row_idx] = ~ROW_ACTIVE_LOW;             // 当前行有效
     end
 

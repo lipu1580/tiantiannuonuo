@@ -3,7 +3,7 @@
 > 逐项的现状、目标、缺失内容、验收标准和测试方案见
 > `docs/仍未完成的功能详情.md`。本文件只保留快速清单。
 
-盘点日期：2026-10-19  
+盘点日期：2026-10-20  
 依据：成员 2 任务书 V1.0、`docs/device_Info_path.md`、`docs/hardware_list.md`、当前 RTL/仿真。
 
 ---
@@ -75,8 +75,9 @@
 - [ ] `expression_mapper` 独立测试（中心、两端、死区）
 - [ ] `key_event_decoder` 独立测试（ALL_OFF 与 pending 事件竞争）
 - [ ] `adc_ads7830` NACK/超时测试
-- [ ] 7 通道调度与压电峰值并发测试
-- [ ] 5 路压电同时触发/快速连击测试
+- [x] 7 通道调度（`tb_input_top` / `tb_adc_ads7830`）
+- [x] 5 路压电独立触发/力度/自动释放（`tb_piezo_peak`）
+- [ ] 5 路压电**同时**触发/快速连击真并发（当前 TB 是逐路触发）
 
 ### 2.3 当前 `tb_fsr_filter.sv` 的缺口
 
@@ -112,7 +113,11 @@
 
 ## 5. 建议的下一步
 
-1. 先定案 ADS7830 通道映射（推荐 CH0 FSR、CH1 POT、CH2~6 压电）。
-2. 实现 `piezo_peak.sv` + 7 通道 ADC 调度。
-3. 用 `input_event_stub` 之外的真实压电脉冲模型做仿真。
-4. 再与成员 1/3 做系统联调和延迟测量。
+P0 的 RTL 已全部完成，剩下的是 P1 可靠性与板级联调：
+
+1. **优先做**：`adc_ads7830` 总线超时/恢复（F-07）。这是目前唯一会让
+   整个输入模块永久卡死的隐患：SDA 一被拉死，状态机可能停在等待 ACK。
+2. 补 `adc_ads7830` 的 NACK 仿真路径。
+3. `expression_mapper` 中心死区 + `fsr_filter` 零点校准（F-06/F-08）。
+4. 补独立 TB：`tb_note_map`、`tb_expression_mapper`、`tb_key_event_decoder`。
+5. 与成员 1/3 做顶层联调，测端到端延迟。

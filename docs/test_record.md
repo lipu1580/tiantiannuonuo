@@ -1,6 +1,6 @@
 # 成员 2 测试记录
 
-日期：2026-10-19  
+日期：2026-10-20  
 工具链：
 - Icarus Verilog 12.0
 - Verilator 5.020
@@ -27,8 +27,10 @@ Makefile 中豁免）。
 | `tb_adc_ads7830` | I2C START/地址/命令/Repeated START/读数据 | PASS | `build/tb_adc_ads7830.log` |
 | `tb_fsr_filter` | 滤波、噪声门限、轻/中/重按映射、通道隔离 | PASS | `build/tb_fsr_filter.log` |
 | `tb_event_queue` | 顺序、背压稳定、溢出标志、满时同拍读写 | PASS | `build/tb_event_queue.log` |
+| `tb_piezo_peak` | 5 路峰值/力度/自动 NOTE_OFF/防重复/ALL_OFF/放电 | PASS | `build/tb_piezo_peak.log` |
+| `tb_matrix_config` | MATRIX_MODE=1：选根音/八度/波形/ALL_OFF，不产生 NOTE_ON | PASS | `build/tb_matrix_config.log` |
 | `tb_input_event_stub` | 演示序列、背压、pattern 切换 | PASS | `build/tb_input_event_stub.log` |
-| `tb_input_top` | 系统级：测试模式、ADC/FSR、单键、和弦、背压、ALL_OFF、八度、波形 | PASS | `build/tb_input_top.log` |
+| `tb_input_top` | 系统级：7 通道 ADC、矩阵、FSR、电位器、压电触发 | PASS | `build/tb_input_top.log` |
 
 ---
 
@@ -57,6 +59,17 @@ Makefile 中豁免）。
 - FSR=64 时，`fsr_filtered=64`，`event_velocity=60`。
 - POT=192 时，`pitch_bend=3072`，证明 CH1 确实被采样。
 - 非 FSR 通道样本不会污染 FSR 滤波状态。
+- 7 通道轮询：CH2~CH6 压电、CH0 FSR、CH1 POT，一轮约 0.84 ms（默认参数）。
+
+### 2.4 压电 / 矩阵配置
+
+- P0~P4 分别映射到 base_note + 0/+2/+4/+7/+9。
+- 峰值 100/150/200/80 分别映射到 velocity 86/141/195/65（阈值 20）。
+- 触发后自动 NOTE_OFF，时间可参数化。
+- 防重复窗口内第二次击打被忽略；窗口外可重触发。
+- ALL_NOTES_OFF 清除活跃压电状态，不再产生后续 NOTE_OFF。
+- `peak_rst[4:0]` 每路都能产生放电脉冲。
+- `MATRIX_MODE=1` 时 K0~K11 只改变 `base_note`，不产生 NOTE_ON。
 
 ### 2.4 八度与波形
 

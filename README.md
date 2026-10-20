@@ -40,6 +40,7 @@ ADS7830 ADC ──┘                 └► expr_*  (expression/pitch_bend/wave
 │       ├── key_event_decoder.sv    # 边沿 -> 标准事件
 │       ├── event_queue.sv          # 事件 FIFO(valid/ready)
 │       ├── adc_ads7830.sv          # ADS7830 I2C 驱动
+│       ├── piezo_peak.sv           # 5 路压电峰值/触发/NOTE_OFF
 │       ├── fsr_filter.sv           # FSR 滤波/门限/力度
 │       ├── expression_mapper.sv    # 电位器 -> pitch_bend
 │       └── input_event_stub.sv     # 无硬件测试事件源
@@ -50,6 +51,8 @@ ADS7830 ADC ──┘                 └► expr_*  (expression/pitch_bend/wave
 │   ├── tb_adc_ads7830.sv
 │   ├── tb_fsr_filter.sv
 │   ├── tb_event_queue.sv
+│   ├── tb_piezo_peak.sv            # 5 路压电触发/自动 NOTE_OFF
+│   ├── tb_matrix_config.sv         # MATRIX_MODE=1 配置模式
 │   ├── tb_input_event_stub.sv
 │   └── tb_input_top.sv             # 系统级联调仿真
 ├── docs/
@@ -79,7 +82,7 @@ make run-tb_input_top   # 只运行系统级仿真
 make clean
 ```
 
-当前回归结果：7 个 testbench 全部 `TEST PASSED`。
+当前回归结果：9 个 testbench 全部 `TEST PASSED`。
 
 ---
 
@@ -116,8 +119,19 @@ make clean
 | `adc_scl` | ADS7830 SCL |
 | `adc_sda_oe` | SDA 开漏使能：1=拉低，0=释放 |
 | `adc_sda_i` | SDA 回读 |
+| `piezo_peak_rst[4:0]` | 5 路峰值电容放电，接 2N7002 栅极 |
+| `piezo_hit_debug[4:0]` | 5 路峰值是否超过阈值 |
+| `piezo_active_debug[4:0]` | 5 路是否正在发声 |
+| `base_note_debug[6:0]` | 当前根音（含八度） |
 | `test_mode` | 1=使用内部测试事件源 |
 | `test_pattern[1:0]` | 测试序列选择 |
+
+ADC 通道分配：`CH0=FSR`、`CH1=电位器`、`CH2~CH6=5 路压电`、`CH7=备用`。
+
+`MATRIX_MODE` 参数：
+
+- `0`：矩阵当键盘，K0~K11 直接发 NOTE_ON（当前测试模式）；
+- `1`：矩阵选根音/音区，5 路压电触发（最终演奏模式）。
 
 SDA 在板级顶层接成双向：
 
@@ -165,15 +179,20 @@ assign adc_sda_i = adc_sda;
 
 - [x] 4x4 矩阵扫描、逐键消抖、按下/释放事件
 - [x] 12 音符键 + ALL_NOTES_OFF + 八度 + 波形
+- [x] `MATRIX_MODE=1`：矩阵选根音/音区，不再直接发 NOTE_ON
 - [x] FSR → ADS7830 → 力度，按下瞬间锁存
 - [x] 电位器 → pitch_bend
 - [x] 四键和弦、背压保持、ALL_OFF 释放抑制
+- [x] 5 路压电峰值/阈值/力度/自动 NOTE_OFF/峰值放电
+- [x] 7 通道 ADC 轮询（CH2~CH6 压电、CH0 FSR、CH1 电位器）
 - [x] 无硬件 `input_event_stub` 演示序列
-- [x] 7 个 testbench 全部通过
+- [x] 9 个 testbench 全部通过
 - [ ] 实物接线与引脚约束（成员 3）
-- [ ] 5 路压电输入调理 + 峰值检测 RTL
-- [ ] 7 通道 ADC 调度（5 压电 + FSR + 电位器）
-- [ ] 与成员 1 `audio_core` 上板联调
+- [ ] 与成员 1 `audio_core` 上板联调（当前阶段先做 4 voice）
 - [ ] 端到端延迟实测
+- [ ] ADC 总线超时恢复、电位器中心死区、FSR 校准（P1）
+
+> 当前阶段按 `VOICE_COUNT=4` 联调；5 指同时触发/扫弦的 8 voice 作为后续升级点，
+> `audio_core.VOICE_COUNT` 必须参数化，不能写死。
 
 

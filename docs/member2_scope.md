@@ -7,6 +7,24 @@ ADS7830 做模拟采集，成员 1 的 `audio_core` 做合成，成员 3 做 I2S
 
 ---
 
+## 0. 当前阶段决策（2026-10-20）
+
+**先实现最基本的 4 个 voice（赛题基础复音数），5 指/扫弦/轮指需要的更多 voice 作为后续升级点。**
+
+| 项目 | 当前决定 |
+|---|---|
+| `audio_core.VOICE_COUNT` | 4（基础版） |
+| 输入侧压电片 | 仍保留 5 片，ADC 仍按 5 路压电规划 |
+| 5 个音同时触发 | 成员 1 做 voice stealing 或丢弃，允许第 5 个音抢占 |
+| `VOICE_COUNT` | 必须参数化，不写死 |
+| 后续升级 | 若演示需要五指同时发声/减少抢音，改成 6~8 voice |
+| 事件协议 | 不变，仍为 `event_type/note_id/velocity` |
+
+> 这里的“四路”指 **4 个 audio voice**，不是只做 4 片压电。
+> 输入侧仍按 5 片压电 + 1 FSR + 1 电位器设计，ADS7830 用 7 个通道。
+
+---
+
 ## 1. 一句话定位
 
 成员 2 负责**把物理演奏动作变成成员 1 能直接使用的标准事件和表情控制字**：
@@ -164,16 +182,16 @@ note_id = clamp(base_note + PIEZO_OFFSET[piezo_index] + 12 * octave_offset, 0, 1
 |---|---|---|
 | `key_scan.sv` | 已完成 | 保持 |
 | `key_debounce.sv` | 已完成 | 保持 |
-| `note_map.sv` | 已完成（音符键） | 改成“根音/八度/波形/ALL_OFF”配置映射 |
-| `key_event_decoder.sv` | 已完成（矩阵发 NOTE_ON） | 拆成矩阵配置译码 + 压电事件编码 |
+| `note_map.sv` | 已完成 | 保留键位映射；MATRIX_MODE=1 时由译码器用键号选根音 |
+| `key_event_decoder.sv` | 已完成 | 支持 `MATRIX_MODE=0/1`，输出 `base_note` |
 | `event_queue.sv` | 已完成 | 保持，供 NOTE_ON/OFF/ALL_OFF 使用 |
-| `adc_ads7830.sv` | 已完成（2 通道） | 保持 I2C 驱动，调度器扩到 7 通道 |
-| `input_top.sv` ADC 调度 | 只扫 CH0/CH1 | 改为 7 通道轮询 |
-| `piezo_peak.sv` | **未实现** | 5 路峰值/阈值/力度/自动 NOTE_OFF/放电控制 |
-| `fsr_filter.sv` | 已完成 | 可增加零点/满量程校准 |
-| `expression_mapper.sv` | 已完成 | 增加中心死区、`EXPR_MIN` |
-| `input_event_stub.sv` | 已完成 | 可增加压电测试序列 |
-| `input_top.sv` 顶层 | 已完成基础版 | 接入 7 通道、piezo_peak、事件仲裁 |
+| `adc_ads7830.sv` | 已完成 | 保持 I2C 驱动；7 通道调度在 `input_top` |
+| `input_top.sv` ADC 调度 | 已完成 | 7 通道轮询，压电优先 |
+| `piezo_peak.sv` | 已完成 | 5 路峰值/阈值/力度/自动 NOTE_OFF/放电控制 |
+| `fsr_filter.sv` | 已完成 | 可增加零点/满量程校准（P1） |
+| `expression_mapper.sv` | 已完成 | 可增加中心死区、`EXPR_MIN`（P1） |
+| `input_event_stub.sv` | 已完成 | 可增加压电测试序列（P1） |
+| `input_top.sv` 顶层 | 已完成 | 已接入 7 通道、piezo_peak、事件仲裁 |
 
 ### 6.1 新增的顶层端口
 

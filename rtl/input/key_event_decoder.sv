@@ -33,15 +33,27 @@
 //   本模块每拍最多输出 1 个事件；多键同时按下时会按键号从小到大
 //   依次送出。下游若长时间不 ready，槽位可能被后来的同键事件覆盖，
 //   这属于 FIFO 溢出前的极端情况，可用 input_overflow 监控。
+//
+// 【MATRIX_MODE 两种模式】
+//   0 = 矩阵当键盘（当前测试模式）：K0~K11 直接发 NOTE_ON/NOTE_OFF。
+//   1 = 矩阵做配置（最终演奏模式）：K0~K11 只选择根音，不发 NOTE_ON；
+//       5 片压电片负责触发，音符由 base_note + 五声音阶偏移得到。
+//
+// 【base_note】
+//   当前根音（已包含八度），供 piezo_peak 计算压电音符：
+//     base_note = clamp(BASE_NOTE + root_pitch_class + 12*octave_offset, 0, 127)
+//   root_pitch_class 由 K0~K11 在 MATRIX_MODE=1 时更新：
+//     K0 -> 0 (C), K1 -> 1 (C#), ... K11 -> 11 (B)
 //=============================================================================
 `include "project_params.svh"
 `include "audio_defs.svh"
 
 module key_event_decoder #(
     parameter integer     KEY_COUNT      = `KEY_COUNT,       // 按键数
-    parameter integer     NOTE_KEY_COUNT = 12,               // 音符键数
+    parameter integer     NOTE_KEY_COUNT = 12,               // 音符/根音键数
     parameter logic [6:0] BASE_NOTE      = `NOTE_BASE_C4,    // K0 起始音
-    parameter logic [7:0] DEFAULT_VEL    = `DEFAULT_VELOCITY // 力度缺失时的默认值
+    parameter logic [7:0] DEFAULT_VEL    = `DEFAULT_VELOCITY,// 力度缺失时的默认值
+    parameter integer     MATRIX_MODE    = 0                 // 0=键盘模式 1=配置模式
 )(
     input  logic                    sys_clk,
     input  logic                    rst_n,
@@ -63,6 +75,9 @@ module key_event_decoder #(
     // 表情状态（送给 input_top 的表达式接口）
     output logic signed [3:0]       octave_offset, // -2~+2
     output logic [1:0]              waveform_sel,  // 0/1/2
+
+    // 当前根音（已包含八度），供压电音符映射使用
+    output logic [6:0]              base_note,
 
     // 调试：当前按住的音符键
     output logic [KEY_COUNT-1:0]    active_note_mask
@@ -135,6 +150,10 @@ module key_event_decoder #(
     // 当前选中的槽位：0=ALL_OFF，1~KEY_COUNT=对应按键
     logic [IDX_W-1:0]     event_req_sel;
 
+    // MATRIX_MODE=1 时，K0~K11 选择的根音音级 0~11
+    logic [3:0]           root_pitch_class;
+    integer               root_calc;
+
     //-------------------------------------------------------------------------
     // 全局功能键（组合判断）
     //   key_pressed 是 16 位单周期脉冲，与对应功能掩码按位与后再或归约，
@@ -160,6 +179,7 @@ module key_event_decoder #(
             suppress_release <= '0;
             octave_offset    <= 4'sd0;
             waveform_sel     <= `WAVE_SINE;
+            root_pitch_class <= 4'd0;   // 默认 C
             for (int i = 0; i < KEY_COUNT; i++) begin
                 pend_type[i]    <= `EVENT_NOP;
                 pend_note[i]    <= 7'd0;
@@ -183,20 +203,29 @@ module key_event_decoder #(
 
             //-----------------------------------------------------------------
             // 2) 音符键按下/释放
+            //    MATRIX_MODE=0：按键直接发 NOTE_ON/OFF（当前测试模式）
+            //    MATRIX_MODE=1：K0~K11 只更新 root_pitch_class，不发事件
             //-----------------------------------------------------------------
             for (int i = 0; i < KEY_COUNT; i++) begin
                 if (key_pressed[i] && map_is_note[i]) begin
-                    // 按下：锁存音符，填入 NOTE_ON 槽位
-                    latched_note[i] <= map_note[i];
-                    pend_valid[i]   <= 1'b1;
-                    pend_type[i]    <= `EVENT_NOTE_ON;
-                    pend_note[i]    <= map_note[i];
-                    // velocity=0 会被成员 1 当作无声，这里兜底为默认力度
-                    pend_vel[i]     <= (velocity_in == 8'd0) ? DEFAULT_VEL
-                                                             : velocity_in;
+                    if (MATRIX_MODE == 0) begin
+                        // 按下：锁存音符，填入 NOTE_ON 槽位
+                        latched_note[i] <= map_note[i];
+                        pend_valid[i]   <= 1'b1;
+                        pend_type[i]    <= `EVENT_NOTE_ON;
+                        pend_note[i]    <= map_note[i];
+                        // velocity=0 会被成员 1 当作无声，这里兜底为默认力度
+                        pend_vel[i]     <= (velocity_in == 8'd0) ? DEFAULT_VEL
+                                                                 : velocity_in;
+                    end else begin
+                        // 配置模式：K0~K11 选择根音音级 0~11
+                        // 同时按下多个根音键时，循环中最后（最大）键号生效；
+                        // 这种情况很少见，演奏时应只按一个根音键。
+                        root_pitch_class <= 4'(i);
+                    end
                 end
 
-                if (key_released[i] && map_is_note[i]) begin
+                if (key_released[i] && map_is_note[i] && (MATRIX_MODE == 0)) begin
                     // 释放：如果该键被 ALL_OFF 抑制，就只清标志，不发 OFF
                     if (suppress_release[i]) begin
                         suppress_release[i] <= 1'b0;
@@ -264,6 +293,22 @@ module key_event_decoder #(
                     event_req_sel      = IDX_W'(i + 1);
                 end
             end
+        end
+    end
+
+    //-------------------------------------------------------------------------
+    // 当前根音：BASE_NOTE + 根音音级 + 12 个八度
+    //   例如 BASE_NOTE=60, root_pitch_class=2(D), octave=+1 -> 74(D5)
+    //-------------------------------------------------------------------------
+    always_comb begin
+        root_calc = int'(BASE_NOTE) + int'(root_pitch_class)
+                    + 12 * int'(octave_offset);
+        if (root_calc < 0) begin
+            base_note = 7'd0;
+        end else if (root_calc > 127) begin
+            base_note = 7'd127;
+        end else begin
+            base_note = 7'(root_calc);
         end
     end
 

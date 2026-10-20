@@ -26,6 +26,8 @@ TBS := \
 	tb_adc_ads7830 \
 	tb_fsr_filter \
 	tb_event_queue \
+	tb_piezo_peak \
+	tb_matrix_config \
 	tb_input_event_stub \
 	tb_input_top
 

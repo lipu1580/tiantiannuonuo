@@ -28,6 +28,9 @@ module tang_nano20k_top (
     output logic        adc_scl,
     inout  wire         adc_sda,
 
+    // 5 路压电峰值电容放电（接 2N7002 栅极）
+    output logic [4:0]  piezo_peak_rst,
+
     // 成员 2 测试事件源选择（input_event_stub）
     input  logic        test_mode,
     input  logic [1:0]  test_pattern,
@@ -79,7 +82,8 @@ module tang_nano20k_top (
     assign adc_sda_i = adc_sda;
 
     input_top #(
-        .SYS_CLK_HZ (`SYS_CLK_HZ)
+        .SYS_CLK_HZ (`SYS_CLK_HZ),
+        .MATRIX_MODE (1)          // 1=矩阵选根音/音区，5 路压电触发
     ) u_input_top (
         .sys_clk        (sys_clk),
         .rst_n          (rst_n),
@@ -88,6 +92,7 @@ module tang_nano20k_top (
         .adc_scl        (adc_scl),
         .adc_sda_oe     (adc_sda_oe),
         .adc_sda_i      (adc_sda_i),
+        .piezo_peak_rst (piezo_peak_rst),
         .event_valid    (event_valid),
         .event_ready    (event_ready),
         .event_type     (event_type),
@@ -107,7 +112,10 @@ module tang_nano20k_top (
         .adc_valid      (),
         .adc_bus_error  (),
         .input_overflow (),
-        .octave_debug   ()
+        .octave_debug   (),
+        .piezo_hit_debug    (),
+        .piezo_active_debug (),
+        .base_note_debug    ()
     );
 
     //---------------------------------------------------------------------

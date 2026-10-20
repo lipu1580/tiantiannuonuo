@@ -27,12 +27,20 @@
 `define KEY_PRESS_MS          2            // 按下确认时间（保证总延迟 < 10 ms）
 `define KEY_RELEASE_MS        5            // 释放确认时间
 `define ADC_I2C_HZ            400_000      // ADS7830 I2C 速率
-`define ADC_SAMPLE_INTERVAL_US 250         // 每个通道的采样间隔
+`define ADC_SAMPLE_INTERVAL_US 20          // 7 通道轮询时，每次事务后的等待间隔
 `define FSR_ADC_CHANNEL       3'd0         // ADS7830 CH0 接 FSR
 `define POT_ADC_CHANNEL       3'd1         // ADS7830 CH1 接电位器
-// 压电扩展（当前 RTL 尚未实现，硬件按 docs/hardware_list.md 接线）：
-//   CH2~CH6 = 5 路压电峰值，CH7 = 备用。
-//   实现时需要把 ADC 调度扩到 7 通道，并增加 piezo_peak 模块。
+
+//--------------------------------------------------------------------------
+// 5 路压电输入（CH2~CH6，CH7 备用）
+//--------------------------------------------------------------------------
+`define PIEZO_COUNT           5
+`define PIEZO_ADC_CHANNEL_BASE 3'd2        // P0 从 CH2 开始
+`define PIEZO_THRESHOLD       8'd20        // 全局触发阈值，后续可做每路校准
+`define PIEZO_NOTE_OFF_MS     500          // 压电片无松开信号，触发后自动释放
+`define PIEZO_RETRIGGER_MS    50           // 防重复触发窗口
+`define PIEZO_PEAK_RST_CYCLES 1350         // 峰值电容放电 50 us @27 MHz
+
 `define FSR_FILTER_SHIFT      2            // 指数滤波 alpha = 1/4
 `define FSR_NOISE_GATE        8'd6         // FSR 噪声门限
 `define NOTE_BASE_C4          7'd60        // 默认起始音符 C4

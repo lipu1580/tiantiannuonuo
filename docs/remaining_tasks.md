@@ -13,14 +13,16 @@
 当前已经完成并验证的是：
 
 - 4×4 矩阵扫描、消抖、12 音符键、ALL_NOTES_OFF、八度、波形
+- `MATRIX_MODE=1`：矩阵选根音/音区，不直接发 NOTE_ON
 - 事件译码、事件 FIFO、valid/ready 背压
-- ADS7830 I2C 驱动（CH0 FSR / CH1 电位器）
+- ADS7830 I2C 驱动（CH0 FSR / CH1 电位器 / CH2~CH6 压电）
+- 5 路压电峰值/阈值/力度/自动 NOTE_OFF/峰值放电
+- 7 通道 ADC 轮询
 - FSR 滤波/力度、电位器 pitch_bend
 - `input_event_stub` 测试事件源
-- 7 个 testbench 全部通过
+- **9 个 testbench 全部通过**
 
-**尚未实现的核心功能是 5 路压电片触发链路**。硬件清单已经补齐，但 RTL 还停留在
-“矩阵 + FSR + 电位器”的两通道采集阶段。
+剩余工作的重点已经从“RTL 功能”转移到“P1 可靠性 + 板级联调”。
 
 ---
 
@@ -28,24 +30,21 @@
 
 ### 1.1 5 路压电输入 RTL
 
-- [ ] 新增 `piezo_peak.sv`（或 `piezo_trigger.sv`）：
-  - [ ] 读取 5 路峰值 ADC 值
-  - [ ] 每路独立阈值、峰值、防重复触发
-  - [ ] 峰值 -> `velocity` 映射
-  - [ ] 超过阈值 -> `NOTE_ON`
-  - [ ] 固定时间后自动 `NOTE_OFF`（压电片没有可靠松开信号）
-  - [ ] FPGA GPIO 控制 2N7002 放电（峰值保持复位）
-- [ ] 5 路压电 -> 音符映射（例如 C4/D4/E4/G4/A4）
-- [ ] 压电触发与矩阵音符共用 `event_queue` 的优先级规则
+- [x] 新增 `piezo_peak.sv`：
+  - [x] 读取 5 路峰值 ADC 值
+  - [x] 每路独立阈值、峰值、防重复触发
+  - [x] 峰值 -> `velocity` 映射
+  - [x] 超过阈值 -> `NOTE_ON`
+  - [x] 固定时间后自动 `NOTE_OFF`（压电片没有可靠松开信号）
+  - [x] FPGA GPIO 控制 2N7002 放电（峰值保持复位）
+- [x] 5 路压电 -> 音符映射（大调五声音阶 +0/+2/+4/+7/+9）
+- [x] 压电触发与矩阵事件共用 `event_queue` 的仲裁规则
 
 ### 1.2 7 通道 ADC 调度
 
-- [ ] `input_top` 的 ADC 调度从“FSR/POT 两通道交替”扩展为 7 通道轮询
-- [ ] 通道映射定案：
-  - 推荐（兼容当前 RTL）：CH0 FSR、CH1 电位器、CH2~CH6 压电、CH7 备用
-  - 或者按 `device_Info_path.md`：CH0~CH4 压电、CH5 FSR、CH6 电位器
-  - **两套只能选一套**，并同步修改 `project_params.svh`、`input_top.sv`、testbench
-- [ ] 把 `SAMPLE_INTERVAL` 降到 20~50 us，保证 7 通道一轮扫描 <1.5 ms
+- [x] `input_top` 的 ADC 调度扩展为 7 通道轮询
+- [x] 通道映射定案：CH0 FSR、CH1 电位器、CH2~CH6 压电、CH7 备用
+- [x] `SAMPLE_INTERVAL` 降到 20 us，一轮扫描约 0.84 ms
 
 ### 1.3 联调必需
 

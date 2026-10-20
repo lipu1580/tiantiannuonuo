@@ -53,6 +53,10 @@ assign adc_sda_i  = adc_sda;
 | `input_state[3:0]` | 调试 | `{test_mode, pressure_valid, adc_busy, event_valid}` |
 | `adc_bus_error` | 调试 | I2C 错误指示 |
 | `input_overflow` | 调试 | 事件 FIFO 溢出 |
+| `piezo_peak_rst[4:0]` | FPGA → 压电调理 | 5 路峰值电容放电，接 2N7002 栅极（高有效） |
+| `piezo_hit_debug[4:0]` | 调试 | 5 路峰值是否超过阈值 |
+| `piezo_active_debug[4:0]` | 调试 | 5 路是否正在发声 |
+| `base_note_debug[6:0]` | 调试 | 当前根音（含八度） |
 
 ---
 
@@ -141,6 +145,18 @@ key_row[3] ──┴── K12 ─────── K13 ─────── K
        → 1nF 到地 → BAT85 峰值检波 → 100nF 保持 → 100Ω → ADS7830 CHx
 ```
 
+另外，5 路峰值保持电容的放电端（2N7002 漏极）需要 5 根 FPGA GPIO：
+
+```text
+FPGA piezo_peak_rst[4:0] ── 100Ω ── 2N7002 栅极
+                                     源极 ── GND
+                                     漏极 ── 100nF 峰值电容
+                                     栅极 ── 100kΩ ── GND
+```
+
+`piezo_peak_rst` 高有效：FPGA 读完峰值后拉高一段（默认 50 us），
+把 100 nF 放电，为下一次触发做准备。
+
 具体要求见 `docs/hardware_list.md` 第 4 节。关键点：
 
 - 压电片两端并 1 MΩ 泄放；
@@ -228,6 +244,8 @@ ADC 原始值
    `input_overflow`。
 6. 压电片信号进入 FPGA/ADC 前必须先经过限流+钳位，见
    `docs/hardware_list.md` 第 4 节。
+7. `piezo_peak_rst[4:0]` 需要 5 根 GPIO，接到 5 路 2N7002 栅极；
+   若引脚不足，可优先保证 5 路全部保留，或把调试信号减少。
 
 ---
 

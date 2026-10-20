@@ -6,8 +6,10 @@
 // 【这个模块在系统中的位置】
 //
 //   4x4 矩阵 ──► key_scan ──► key_debounce ──► key_event_decoder ──┐
-//                                                                  ├─► event_queue ──► event_* ──► audio_core（成员 1）
-//   ADS7830 ──► ADC 采样调度 ──► fsr_filter ──► velocity ───────────┘
+//                                                                  │
+//   5 路压电 ──► 保护/峰值保持 ──► ADS7830 CH2~CH6 ──► piezo_peak ──┼─► event_queue ──► event_* ──► audio_core（成员 1）
+//                                                                  │
+//   ADS7830 ──► 7 通道采样调度 ──► fsr_filter ──► expression ───────┘
 //                            └──► expression_mapper ──► pitch_bend / waveform_sel
 //
 // 【建议阅读顺序】
@@ -76,7 +78,23 @@ module input_top #(
     // 事件与音符
     //-------------------------------------------------------------------------
     parameter integer EVENT_FIFO_DEPTH = `EVENT_FIFO_DEPTH,     // 事件 FIFO 深度，默认 8
-    parameter logic [6:0] BASE_NOTE    = `NOTE_BASE_C4          // K0 对应 MIDI 60 (C4)
+    parameter logic [6:0] BASE_NOTE    = `NOTE_BASE_C4,         // K0 对应 MIDI 60 (C4)
+
+    //-------------------------------------------------------------------------
+    // 矩阵/压电演奏模式
+    //   MATRIX_MODE=0：矩阵当键盘（当前测试模式），K0~K11 直接发 NOTE_ON
+    //   MATRIX_MODE=1：矩阵选根音，5 路压电触发（最终演奏模式）
+    //-------------------------------------------------------------------------
+    parameter integer MATRIX_MODE      = 0,
+
+    //-------------------------------------------------------------------------
+    // 5 路压电输入
+    //   注意参数名不能和 project_params.svh 的宏同名，否则宏展开会冲突。
+    //-------------------------------------------------------------------------
+    parameter logic [2:0] PIEZO_BASE_CH = `PIEZO_ADC_CHANNEL_BASE, // P0 所在 ADC 通道
+    parameter logic [7:0] PIEZO_THRESH  = `PIEZO_THRESHOLD,        // 全局触发阈值
+    parameter integer PIEZO_OFF_MS     = `PIEZO_NOTE_OFF_MS,      // 自动 NOTE_OFF 时间
+    parameter integer PIEZO_RETRIG_MS  = `PIEZO_RETRIGGER_MS      // 防重复触发窗口
 )(
     //-------------------------------------------------------------------------
     // 时钟与复位（整颗模块单时钟域）
@@ -137,7 +155,15 @@ module input_top #(
     output logic        adc_valid,           // ADC 样本有效（单周期）
     output logic        adc_bus_error,       // I2C NACK/异常
     output logic        input_overflow,      // 事件 FIFO 溢出
-    output logic signed [3:0] octave_debug   // 当前八度偏移 -2~+2
+    output logic signed [3:0] octave_debug,  // 当前八度偏移 -2~+2
+
+    //-------------------------------------------------------------------------
+    // 压电输入调试/控制
+    //-------------------------------------------------------------------------
+    output logic [4:0]  piezo_peak_rst,      // 5 路峰值电容放电（接 2N7002 栅极）
+    output logic [4:0]  piezo_hit_debug,     // 5 路峰值是否超过阈值
+    output logic [4:0]  piezo_active_debug,  // 5 路是否正在发声
+    output logic [6:0]  base_note_debug      // 当前根音（含八度）
 );
 
     //-------------------------------------------------------------------------
@@ -178,27 +204,31 @@ module input_top #(
     );
 
     //-------------------------------------------------------------------------
-    // ADC 采样调度：FSR / 电位器交替采样
+    // ADC 采样调度：7 通道轮询
     //
-    // 为什么需要调度器：
-   //   ADS7830 一次事务约 100 us，不能每拍都发请求；本状态机负责
-    //   “等间隔发起请求 -> 等 busy 上升沿确认 -> 切换下一个通道”。
+    //   顺序：CH2 CH3 CH4 CH5 CH6 CH0 CH1
+    //   先采 5 路压电，保证触发延迟最低；FSR/电位器变化慢，放在后面。
+    //   一轮 7 通道约 (100 us + SAMPLE_INTERVAL) * 7，
+    //   默认 SAMPLE_INTERVAL=20 us -> 一轮约 0.84 ms。
     //
     // 关键信号：
     //   req_pending   : 已产生请求，等待 ADC 在它自己的位速率 tick 上接收
     //   sample_req    : 组合输出，真正送给 adc_ads7830 的电平
     //   sample_busy_d : busy 的上一拍值，用于检测 busy 的上升沿
-    //   next_adc_ch   : 下一次要采样的通道
+    //   scan_idx      : 当前轮询位置 0~6
+    //   adc_ch_sel    : 本轮要采的 ADC 通道
     //
     // 注意：不能看到 sample_req=1 就立刻清 pending。ADC 只在位速率 tick
     //       上采样 sample_req，过早清除会导致请求丢失。
     //-------------------------------------------------------------------------
+    localparam integer ADC_SCAN_COUNT  = 7;
     localparam integer SAMPLE_WAIT_MAX = (SAMPLE_INTERVAL < 4) ? 4 : SAMPLE_INTERVAL;
     localparam integer WAIT_W          = $clog2(SAMPLE_WAIT_MAX + 1);
 
     logic [WAIT_W-1:0] sample_wait;     // 空闲等待计数器
     logic              req_pending;     // 有请求待 ADC 接收
-    logic [2:0]        next_adc_ch;     // 下一个通道
+    logic [2:0]        scan_idx;        // 7 通道轮询位置
+    logic [2:0]        adc_ch_sel;      // 本轮通道
     logic              sample_busy_d;   // busy 打一拍
 
     logic              sample_req;      // 请求电平
@@ -208,6 +238,19 @@ module input_top #(
     logic [2:0]        sample_channel;  // 样点对应通道
     logic              adc_bus_error_r; // I2C 错误
 
+    // 通道顺序：压电优先，FSR/电位器最后
+    always_comb begin
+        case (scan_idx)
+            3'd0:    adc_ch_sel = PIEZO_BASE_CH;
+            3'd1:    adc_ch_sel = PIEZO_BASE_CH + 3'd1;
+            3'd2:    adc_ch_sel = PIEZO_BASE_CH + 3'd2;
+            3'd3:    adc_ch_sel = PIEZO_BASE_CH + 3'd3;
+            3'd4:    adc_ch_sel = PIEZO_BASE_CH + 3'd4;
+            3'd5:    adc_ch_sel = FSR_CHANNEL;
+            default: adc_ch_sel = POT_CHANNEL;
+        endcase
+    end
+
     // 只要还有 pending 且 ADC 空闲，就把请求电平拉高；
     // ADC 会在下一个 tick 看到它并置 busy。
     assign sample_req = req_pending && !sample_busy;
@@ -216,18 +259,18 @@ module input_top #(
         if (!rst_n) begin
             sample_wait   <= '0;
             req_pending   <= 1'b0;
-            next_adc_ch   <= FSR_CHANNEL;   // 上电先采 FSR
+            scan_idx      <= 3'd0;
             sample_busy_d <= 1'b0;
         end else begin
             sample_busy_d <= sample_busy;   // 用于检测 busy 的 0->1
 
             if (sample_busy && !sample_busy_d) begin
                 // busy 上升沿：ADC 已经接收本次请求
-                // 清 pending、重新计时，并切换到另一个通道
+                // 清 pending、重新计时，并前进到下一个通道
                 req_pending <= 1'b0;
                 sample_wait <= '0;
-                next_adc_ch <= (next_adc_ch == FSR_CHANNEL) ? POT_CHANNEL
-                                                            : FSR_CHANNEL;
+                scan_idx    <= (scan_idx == 3'(ADC_SCAN_COUNT - 1))
+                               ? 3'd0 : scan_idx + 1'b1;
             end else if (!req_pending && !sample_busy) begin
                 // 空闲且没有待发请求：等够 SAMPLE_INTERVAL 后置 pending
                 if (sample_wait == WAIT_W'(SAMPLE_WAIT_MAX - 1)) begin
@@ -247,7 +290,7 @@ module input_top #(
         .sys_clk         (sys_clk),
         .rst_n           (rst_n),
         .sample_req      (sample_req),
-        .adc_channel_req (next_adc_ch),
+        .adc_channel_req (adc_ch_sel),
         .sample_busy     (sample_busy),
         .sample_valid    (sample_valid),
         .sample_data     (sample_data),
@@ -262,7 +305,8 @@ module input_top #(
     // FSR 力度
     //   fsr_filter 只接受 sample_channel == FSR_CHANNEL 的样本；
     //   velocity 是寄存器输出，更新率约 1.4 kHz。
-    //   note_velocity 在按键按下的那一刻被 key_event_decoder 锁存。
+    //   note_velocity 只在 MATRIX_MODE=0（矩阵当键盘）时用于按键力度；
+    //   MATRIX_MODE=1 时力度由压电峰值提供，FSR 只做 expression。
     //-------------------------------------------------------------------------
     logic [7:0] fsr_velocity;   // 滤波/映射后的 0~255 力度
     logic       pressure_valid; // 当前压力是否超过噪声门限
@@ -318,16 +362,39 @@ module input_top #(
     assign expression = fsr_filtered;
 
     //-------------------------------------------------------------------------
-    // 按键事件译码 -> FIFO
-    //   key_event_decoder 每拍最多产生 1 个事件请求（req_*）；
-    //   event_queue 负责缓存并在 audio_core 能接收时送出。
-    //   req_ready 是 FIFO 的写就绪，queue_valid/queue_ready 是读侧握手。
+    // 按键/压电事件 -> 仲裁 -> FIFO
+    //
+    //   两路事件源：
+    //     matrix_req_*：矩阵译码器（NOTE_ON/OFF/ALL_NOTES_OFF）
+    //     piezo_req_* ：5 路压电触发（NOTE_ON / 自动 NOTE_OFF）
+    //
+    //   仲裁优先级：
+    //     1. ALL_NOTES_OFF（矩阵）—— 最高，先清掉所有声部
+    //     2. 压电事件 —— 触发是瞬态的，优先于普通矩阵事件
+    //     3. 矩阵普通事件
+    //
+    //   未被选中的源会把事件保持在各自的 pending 表中，直到 ready。
     //-------------------------------------------------------------------------
-    logic        req_valid;
-    logic        req_ready;
-    logic [1:0]  req_type;
-    logic [6:0]  req_note;
-    logic [7:0]  req_vel;
+    logic        matrix_req_valid;
+    logic        matrix_req_ready;
+    logic [1:0]  matrix_req_type;
+    logic [6:0]  matrix_req_note;
+    logic [7:0]  matrix_req_vel;
+
+    logic        piezo_req_valid;
+    logic        piezo_req_ready;
+    logic [1:0]  piezo_req_type;
+    logic [6:0]  piezo_req_note;
+    logic [7:0]  piezo_req_vel;
+
+    logic [6:0]  base_note;       // 当前根音（含八度）
+    logic        piezo_all_off;   // ALL_NOTES_OFF 被接收时清压电状态
+
+    logic        queue_wr_valid;
+    logic        queue_wr_ready;
+    logic [1:0]  queue_wr_type;
+    logic [6:0]  queue_wr_note;
+    logic [7:0]  queue_wr_vel;
 
     logic        queue_valid;
     logic        queue_ready;
@@ -335,10 +402,16 @@ module input_top #(
     logic [6:0]  queue_note;
     logic [7:0]  queue_vel;
 
+    //-------------------------------------------------------------------------
+    // 矩阵译码器
+    //   MATRIX_MODE=0：K0~K11 直接发 NOTE_ON/OFF（当前测试模式）
+    //   MATRIX_MODE=1：K0~K11 只更新 base_note，不发 NOTE_ON（最终模式）
+    //-------------------------------------------------------------------------
     key_event_decoder #(
         .KEY_COUNT      (KEY_COUNT),
         .NOTE_KEY_COUNT (12),
-        .BASE_NOTE      (BASE_NOTE)
+        .BASE_NOTE      (BASE_NOTE),
+        .MATRIX_MODE    (MATRIX_MODE)
     ) u_decoder (
         .sys_clk          (sys_clk),
         .rst_n            (rst_n),
@@ -346,27 +419,95 @@ module input_top #(
         .key_released     (key_released),
         .key_down         (key_down),
         .velocity_in      (note_velocity),
-        .event_req_valid  (req_valid),
-        .event_req_ready  (req_ready),
-        .event_req_type   (req_type),
-        .event_req_note   (req_note),
-        .event_req_velocity (req_vel),
+        .event_req_valid  (matrix_req_valid),
+        .event_req_ready  (matrix_req_ready),
+        .event_req_type   (matrix_req_type),
+        .event_req_note   (matrix_req_note),
+        .event_req_velocity (matrix_req_vel),
         .octave_offset    (octave_debug),
         .waveform_sel     (waveform_key),
+        .base_note        (base_note),
         .active_note_mask ()
     );
 
+    //-------------------------------------------------------------------------
+    // 5 路压电触发
+    //   ADC 样本 -> 峰值/阈值 -> NOTE_ON + velocity
+    //                        -> 定时 NOTE_OFF
+    //                        -> peak_rst 给硬件峰值电容放电
+    //-------------------------------------------------------------------------
+    piezo_peak #(
+        .SYS_CLK_HZ      (SYS_CLK_HZ),
+        .THRESHOLD       (PIEZO_THRESH),
+        .NOTE_OFF_MS     (PIEZO_OFF_MS),
+        .RETRIGGER_MS    (PIEZO_RETRIG_MS),
+        .PEAK_RST_CYCLES (`PIEZO_PEAK_RST_CYCLES)
+    ) u_piezo (
+        .sys_clk            (sys_clk),
+        .rst_n              (rst_n),
+        .sample_valid       (sample_valid),
+        .sample_channel     (sample_channel),
+        .sample_data        (sample_data),
+        .piezo_ch_base      (PIEZO_BASE_CH),
+        .base_note          (base_note),
+        .all_off            (piezo_all_off),
+        .peak_rst           (piezo_peak_rst),
+        .event_req_valid    (piezo_req_valid),
+        .event_req_ready    (piezo_req_ready),
+        .event_req_type     (piezo_req_type),
+        .event_req_note     (piezo_req_note),
+        .event_req_velocity (piezo_req_vel),
+        .hit_debug          (piezo_hit_debug),
+        .active_debug       (piezo_active_debug)
+    );
+
+    //-------------------------------------------------------------------------
+    // 事件仲裁：ALL_OFF > 压电 > 矩阵普通事件
+    //-------------------------------------------------------------------------
+    logic matrix_sel;
+    logic piezo_sel;
+
+    always_comb begin
+        matrix_sel = 1'b0;
+        piezo_sel  = 1'b0;
+
+        if (matrix_req_valid && (matrix_req_type == `EVENT_ALL_NOTES_OFF)) begin
+            matrix_sel = 1'b1;
+        end else if (piezo_req_valid) begin
+            piezo_sel = 1'b1;
+        end else if (matrix_req_valid) begin
+            matrix_sel = 1'b1;
+        end
+    end
+
+    assign queue_wr_valid = matrix_sel | piezo_sel;
+    assign queue_wr_type  = matrix_sel ? matrix_req_type : piezo_req_type;
+    assign queue_wr_note  = matrix_sel ? matrix_req_note : piezo_req_note;
+    assign queue_wr_vel   = matrix_sel ? matrix_req_vel  : piezo_req_vel;
+
+    // 只有被选中的源才会看到 ready；另一个源继续持有事件
+    assign matrix_req_ready = queue_wr_ready && matrix_sel;
+    assign piezo_req_ready  = queue_wr_ready && piezo_sel;
+
+    // ALL_OFF 被 FIFO 接收的同拍，通知 piezo_peak 清活跃状态/待发事件
+    assign piezo_all_off = matrix_req_valid &&
+                           (matrix_req_type == `EVENT_ALL_NOTES_OFF) &&
+                           matrix_req_ready;
+
+    //-------------------------------------------------------------------------
+    // 事件 FIFO
+    //-------------------------------------------------------------------------
     event_queue #(
         .DEPTH  (EVENT_FIFO_DEPTH),
         .NOTE_W (7)
     ) u_event_queue (
         .sys_clk        (sys_clk),
         .rst_n          (rst_n),
-        .wr_valid       (req_valid),
-        .wr_ready       (req_ready),
-        .wr_type        (req_type),
-        .wr_note        (req_note),
-        .wr_vel         (req_vel),
+        .wr_valid       (queue_wr_valid),
+        .wr_ready       (queue_wr_ready),
+        .wr_type        (queue_wr_type),
+        .wr_note        (queue_wr_note),
+        .wr_vel         (queue_wr_vel),
         .rd_valid       (queue_valid),
         .rd_ready       (queue_ready),
         .rd_type        (queue_type),
@@ -427,10 +568,12 @@ module input_top #(
     //   input_state[2] = pressure_valid
     //   input_state[1] = adc_busy
     //   input_state[0] = event_valid
+    //   piezo_*_debug 单独给出，便于观察 5 路压电状态。
     //-------------------------------------------------------------------------
-    assign adc_busy      = sample_busy;
-    assign adc_valid     = sample_valid;
-    assign adc_bus_error = adc_bus_error_r;
-    assign input_state   = {test_mode, pressure_valid, sample_busy, event_valid};
+    assign adc_busy       = sample_busy;
+    assign adc_valid      = sample_valid;
+    assign adc_bus_error  = adc_bus_error_r;
+    assign input_state    = {test_mode, pressure_valid, sample_busy, event_valid};
+    assign base_note_debug = base_note;
 
 endmodule

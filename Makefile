@@ -6,19 +6,19 @@ RTL_DIR := rtl/audio
 TB_DIR := sim
 
 #目标与tb文件
-RTL_NAME := waveform_rom
-TB_NAME := tb_$(RTL_NAME)
+WAIT_TB_NAME := dds_oscillator
+TB_NAME := tb_$(WAIT_TB_NAME)
 suffix := .sv
-RTL_FILE = $(addsuffix $(suffix), $(RTL_NAME))
+RTL_FILE = $(wildcard rtl/audio/*.sv)
 TB_FILE = $(addsuffix $(suffix), $(TB_NAME))
 
 VFLAGS = --binary --timing 
 
-.PHONY: tick clean
+.PHONY: sim clean
 
-tick:
+sim:
 	mkdir -p $(BUILF_DIR)
-	$(VERILATOR) $(VFLAGS) --top-module $(TB_NAME) --Mdir $(BUILF_DIR) $(RTL_DIR)/$(RTL_FILE) $(TB_DIR)/$(TB_FILE)
+	$(VERILATOR) $(VFLAGS) --top-module $(TB_NAME) --Mdir $(BUILF_DIR) $(RTL_FILE) $(TB_DIR)/$(TB_FILE)
 	$(BUILF_DIR)/V$(TB_NAME)
 
 clean:

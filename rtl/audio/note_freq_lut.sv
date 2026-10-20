@@ -1,3 +1,5 @@
+`timescale 1ns/1ns
+
 module note_freq_lut #(
     parameter integer NOTE_W      = 7,      // 音符编号位宽
     parameter integer PHASE_W     = 32,     // DDS 相位累加器位宽

@@ -1,3 +1,5 @@
+`timescale 1ns/1ns
+
 module adsr #(
     parameter logic [15:0] ATTACK_STEP   = 16'd500,   // 每个采样周期的起音增量
     parameter logic [15:0] DECAY_STEP    = 16'd30,    // 每个采样周期的衰减量

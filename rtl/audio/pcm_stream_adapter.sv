@@ -1,3 +1,5 @@
+`timescale 1ns/1ns
+
 module pcm_stream_adapter #(
     parameter integer INPUT_W  = 24, // 混音输入位宽
     parameter integer SAMPLE_W = 16, // PCM 输出位宽

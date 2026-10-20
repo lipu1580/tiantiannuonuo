@@ -1,3 +1,4 @@
+`timescale 1ns/1ns
 module dds_oscillator #(
     parameter integer PHASE_W  = 32, // 相位累加器位宽
     parameter integer SAMPLE_W = 16, // 波形样本位宽

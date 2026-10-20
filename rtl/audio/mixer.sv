@@ -1,3 +1,5 @@
+`timescale 1ns/1ns
+
 module mixer #(
     parameter integer VOICE_COUNT = 4, // 输入声部数量
     parameter integer VOICE_W     = 24, // 单路声部位宽

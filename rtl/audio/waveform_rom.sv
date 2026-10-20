@@ -1,3 +1,5 @@
+`timescale 1ns/1ns
+
 module waveform_rom #(
     parameter integer ADDR_W   = 10, // 波形相位地址位宽
     parameter integer SAMPLE_W = 16,  // 波形样本位宽

@@ -1,3 +1,5 @@
+`timescale 1ns/1ns
+
 module audio_test_source #(
     parameter integer NOTE_W = 7,          // 音符编号位宽
     parameter integer SAMPLE_RATE = 48_000 // 用于生成测试事件间隔

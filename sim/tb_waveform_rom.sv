@@ -1,5 +1,8 @@
 module tb_waveform_rom;
 
+logic clk = 1'b0;
+always #5 clk = ~clk;
+
 parameter integer ADDR_W   = 10; // 波形相位地址位宽
 parameter integer SAMPLE_W = 16; // 波形样本位宽
 
@@ -11,6 +14,7 @@ waveform_rom #(
     .ADDR_W (ADDR_W),
     .SAMPLE_W (SAMPLE_W)
 ) DUT (
+    .sys_clk (clk),
     .address (address),
     .waveform_sel (sel),
     .waveform_sample (sample)
@@ -21,7 +25,7 @@ waveform_rom #(
 
 initial begin
 
-    address = 10'd1; sel = 2'b0; #1;
+    address = 10'd1; sel = 2'b0; @(posedge clk); #1;
     if (sample == 16'h00C9) begin
         pass++;
     end else begin
@@ -29,7 +33,7 @@ initial begin
         $display("LUT is wrong");
     end
 
-    address = 10'd1022; sel = 2'b00; #1;
+    address = 10'd1022; sel = 2'b00; @(posedge clk); #1;
     if (sample == 16'hFE6E) begin
         pass++;
     end else begin
@@ -37,7 +41,7 @@ initial begin
         $display("LUT is wrong");
     end
 
-    address = 10'd1022; sel = 2'b01; #1;
+    address = 10'd1022; sel = 2'b01; @(posedge clk); #1;
     if (sample == 16'h0) begin
         pass++;
     end else begin
@@ -45,7 +49,7 @@ initial begin
         $display("sel is wrong");
     end
 
-    address = 10'd1022; sel = 2'b10; #1;
+    address = 10'd1022; sel = 2'b10; @(posedge clk); #1;
     if (sample == 16'h0) begin
         pass++;
     end else begin

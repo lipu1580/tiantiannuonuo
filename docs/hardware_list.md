@@ -275,8 +275,9 @@ ADS7830 有 8 个通道。为了**不破坏当前已经验证的 RTL**，建议�
 如果团队坚持 `docs/device_Info_path.md` 里的“CH0~CH4 压电、CH5 FSR、CH6 电位器”
 方案，则必须同步修改：
 
-- `rtl/common/project_params.svh` 的通道常量；
-- `input_top.sv` 的采样调度（目前只交替 2 个通道）；
+- `rtl/common/project_params.svh` 的通道常量（`FSR_ADC_CHANNEL`、
+  `POT_ADC_CHANNEL`、`PIEZO_ADC_CHANNEL_BASE`）；
+- `input_top.sv` 里 7 通道调度 `scan_idx` 对应的 `adc_ch_sel` 映射表；
 - `tb_input_top.sv` 和 `tb_adc_ads7830.sv` 的期望值。
 
 两种方案只能选一种，不能硬件按一套、软件按另一套。

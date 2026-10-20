@@ -1,7 +1,8 @@
 //=============================================================================
 // 文件   : input_top.sv
 // 归属   : 成员 2（交互输入与演奏事件模块）唯一公开顶层
-// 功能   : 4x4 按键矩阵 + FSR 力度 + 电位器表情 -> 标准演奏事件 + 表情接口。
+// 功能   : 4x4 按键矩阵 + 5 路压电 + FSR 力度 + 电位器表情
+//          -> 标准演奏事件 + 表情接口。
 //
 // 【这个模块在系统中的位置】
 //
@@ -14,7 +15,7 @@
 //
 // 【建议阅读顺序】
 //   key_scan.sv -> key_debounce.sv -> note_map.sv -> key_event_decoder.sv
-//   -> event_queue.sv -> adc_ads7830.sv -> fsr_filter.sv
+//   -> piezo_peak.sv -> event_queue.sv -> adc_ads7830.sv -> fsr_filter.sv
 //   -> expression_mapper.sv -> input_event_stub.sv -> 本文件（看拼装）
 //
 // 【一句话理解】
@@ -32,10 +33,13 @@
 //   1. 成员 1 只需例化本模块，并把 event_* / expr_* 接到 audio_core。
 //   2. ADS7830 是 I2C 器件，物理接口为 adc_scl/adc_sda_oe/adc_sda_i；
 //      板级顶层用三态缓冲把 oe 转换成双向 SDA。
-//   3. ADC 通道默认 CH0=FSR，CH1=电位器，可参数化。
+//   3. ADC 通道分配（通过参数可改）：
+//      CH0=FSR、CH1=电位器、CH2~CH6=5 路压电(P0~P4)、CH7=备用。
+//      调度顺序 CH2..CH6 -> CH0 -> CH1，压电优先以降低触发延迟。
 //   4. test_mode=1 时事件源切换为 input_event_stub，真实按键事件被排空丢弃；
 //      表情仍来自实际 ADC，waveform_sel 强制为正弦波。
 //   5. 成员 1 的 audio_core 内部也有测试音源，两套 test_mode 不要同时打开。
+//   6. 事件优先级：ALL_NOTES_OFF > 压电触发 > 矩阵按键。
 //=============================================================================
 `include "project_params.svh"
 `include "audio_defs.svh"
@@ -66,8 +70,10 @@ module input_top #(
     //       27e6 / (400e3 * 4) = 16.875 -> 整数 16
     //       实际 SCL ≈ 27e6 / (16 * 4) = 421.9 kHz
     //   SAMPLE_INTERVAL：一次转换完成后再等待多少拍才发起下一次请求
-    //       27e6 / (1e6 / 250) = 6750 拍 = 250 us
-    //   两个通道交替：CH0(FSR) -> CH1(POT) -> CH0 -> ...
+    //       27e6 / (1e6 / 20) = 540 拍 = 20 us（ADC_SAMPLE_INTERVAL_US=20）
+    //   7 通道轮询：CH2 CH3 CH4 CH5 CH6(压电) -> CH0(FSR) -> CH1(POT) -> 循环
+    //       单次 I2C 事务（地址+命令+读）约 100 us，加 20 us 间隔
+    //       一轮 7 通道约 0.84 ms
     //-------------------------------------------------------------------------
     parameter integer I2C_QUARTER_DIV  = SYS_CLK_HZ / (`ADC_I2C_HZ * 4),
     parameter integer SAMPLE_INTERVAL  = SYS_CLK_HZ / (1_000_000 / `ADC_SAMPLE_INTERVAL_US),

@@ -244,39 +244,37 @@ input  logic [4:0] piezo_hit;        // 5 路比较器输出
 
 ---
 
-## 9. 当前代码与最终方案的差异（重点）
+## 9. 最终方案与实现状态（重点）
 
-当前 RTL 是一个**可用的过渡版本**：
+最终方案已在 RTL 中落地（2026-10-20），只剩硬件/联调：
 
-- 矩阵 K0~K11 直接发 NOTE_ON/NOTE_OFF；
-- FSR 同时充当按键力度和持续表情；
-- ADC 只扫 FSR/电位器两个通道；
-- 没有压电触发。
+| 最终方案要求 | 实现位置 | 状态 |
+|---|---|---|
+| 矩阵 K0~K11 只更新根音，不发 NOTE_ON | `key_event_decoder.sv` `MATRIX_MODE=1` | ✅ |
+| 5 路压电峰值 -> NOTE_ON + velocity | `piezo_peak.sv` | ✅ |
+| 压电自动 NOTE_OFF | `piezo_peak.sv` `PIEZO_OFF_MS` | ✅ |
+| FSR 只做 `expression` | `fsr_filter.sv` + `expression_mapper.sv` | ✅ |
+| ADC 扫 7 个通道 | `input_top.sv` `scan_idx` 0~6 | ✅ |
+| `input_top` 增加 `piezo_peak_rst[4:0]` | `input_top.sv` 端口 | ✅ |
+| 压电保护/峰值保持电路 | 硬件制作 | ⬜ |
+| 顶层 + `.cst` + 上板测试 | 成员 3 | ⬜ |
 
-最终方案需要改成：
+`MATRIX_MODE` 参数保留两种工作方式：
 
-1. 矩阵 K0~K11 只更新根音，不发 NOTE_ON；
-2. 5 路压电峰值 -> NOTE_ON + velocity；
-3. 压电自动 NOTE_OFF；
-4. FSR 只做 `expression`；
-5. ADC 扫 7 个通道；
-6. `input_top` 增加 `piezo_peak_rst[4:0]`。
-
-建议保留一个参数 `MATRIX_MODE`：
-
-- `MATRIX_MODE=0`：当前“矩阵当键盘”的测试模式；
-- `MATRIX_MODE=1`：最终“矩阵选音区、压电触发”的演奏模式。
+- `MATRIX_MODE=0`：矩阵当键盘的测试模式（默认，兼容旧 testbench）；
+- `MATRIX_MODE=1`：矩阵选音区、压电触发的正式演奏模式。
 
 这样不会破坏已经通过的 testbench，也方便上板对比。
 
 ---
 
-## 10. 建议实施顺序
+## 10. 建议实施顺序（后 3 步待完成）
 
-1. 定案通道映射（推荐 CH0 FSR、CH1 POT、CH2~6 压电）。
-2. 写 `piezo_peak.sv`，先用仿真模型验证阈值/力度/自动 NOTE_OFF。
-3. 把 ADC 调度扩到 7 通道。
-4. 改 `note_map` / `key_event_decoder`，支持 `MATRIX_MODE`。
-5. 在 `input_top` 中接入压电事件和 `piezo_peak_rst`。
-6. 增加压电脉冲模型、5 路并发触发 testbench。
-7. 与成员 1/3 联调，测端到端延迟。
+1. ~~定案通道映射（CH0 FSR、CH1 POT、CH2~6 压电）~~ ✅
+2. ~~写 `piezo_peak.sv`，仿真验证阈值/力度/自动 NOTE_OFF~~ ✅
+3. ~~把 ADC 调度扩到 7 通道~~ ✅
+4. ~~改 `note_map` / `key_event_decoder`，支持 `MATRIX_MODE`~~ ✅
+5. ~~在 `input_top` 中接入压电事件和 `piezo_peak_rst`~~ ✅
+6. ~~增加压电脉冲模型、5 路并发触发 testbench~~ ✅
+7. 制作 5 路压电调理板并上板验证。
+8. 与成员 1/3 联调，测端到端延迟（目标 ≤10 ms）。

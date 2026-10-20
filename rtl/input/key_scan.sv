@@ -30,12 +30,13 @@ module key_scan #(
     parameter integer ROW_COUNT      = `KEY_ROW_COUNT, // 行数
     parameter integer COL_COUNT      = `KEY_COL_COUNT, // 列数
     // 默认整帧刷新率 2 kHz，即单行驻留 125 us
-    parameter integer ROW_DWELL_CYC  = SYS_CLK_HZ / (`MATRIX_FRAME_HZ * ROW_COUNT),
+    parameter integer ROW_DWELL_CYC  = SYS_CLK_HZ / (`MATRIX_FRAME_HZ * ROW_COUNT), //每行停留多少拍
     parameter integer SETTLE_CYC     = 8,             // 行切换后的等待拍数
     // 行/列有效电平：1 表示低有效（配合外部上拉）
     parameter logic   ROW_ACTIVE_LOW = 1'b1,
     parameter logic   COL_ACTIVE_LOW = 1'b1,
-    parameter integer ROW_W          = (ROW_COUNT <= 1) ? 1 : $clog2(ROW_COUNT)
+    parameter integer ROW_W          = (ROW_COUNT <= 1) ? 1 : $clog2(ROW_COUNT) //行号计数器的位宽2，2位宽表示4行足够
+                                                        //这么写其实没啥用，我们不会换成8x8矩阵的
 )(
     input  logic                            sys_clk,
     input  logic                            rst_n,
@@ -43,7 +44,7 @@ module key_scan #(
     // 行驱动：只有当前扫描行有效，其余保持无效电平
     output logic [ROW_COUNT-1:0]            key_row,
     // 列输入：必须先同步再使用
-    input  logic [COL_COUNT-1:0]            key_col,
+    input  logic [COL_COUNT-1:0]            key_col,    //[3:0]
 
     // 原始按键状态：bit[row*COL_COUNT + col]，1=按下（已归一化极性）
     output logic [ROW_COUNT*COL_COUNT-1:0]  raw_key_state,
@@ -55,7 +56,7 @@ module key_scan #(
 
     localparam integer DWELL_CYC = (ROW_DWELL_CYC < (SETTLE_CYC + 2))
                                    ? (SETTLE_CYC + 2) : ROW_DWELL_CYC;
-    localparam integer DWELL_W   = (DWELL_CYC <= 1) ? 1 : $clog2(DWELL_CYC);
+    localparam integer DWELL_W   = (DWELL_CYC <= 1) ? 1 : $clog2(DWELL_CYC);    //存放DWELL的容器需要12位宽
 
     //-------------------------------------------------------------------------
     // 列输入同步（两级触发器）
@@ -94,7 +95,7 @@ module key_scan #(
             dwell_cnt <= '0;
             row_idx   <= (row_idx == ROW_W'(ROW_COUNT - 1)) ? '0 : row_idx + 1'b1;
         end else begin
-            dwell_cnt <= dwell_cnt + 1'b1;
+            dwell_cnt <= dwell_cnt + 1'b1;      //其实这一步非常重要，是整个模块中的周期更新计数器的自增行
 
             // 行电平稳定后采样一次，本行其余时间保持上次结果。
             // 这样即使行切换瞬间有毛刺，也不会写进 raw_key_state。

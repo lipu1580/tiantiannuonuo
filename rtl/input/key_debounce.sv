@@ -26,9 +26,9 @@
 `include "project_params.svh"
 
 module key_debounce #(
-    parameter integer KEY_COUNT      = `KEY_COUNT,                              // 按键数
-    parameter integer PRESS_CYCLES   = (`SYS_CLK_HZ / 1000) * `KEY_PRESS_MS,   // 2 ms
-    parameter integer RELEASE_CYCLES = (`SYS_CLK_HZ / 1000) * `KEY_RELEASE_MS  // 5 ms
+    parameter integer KEY_COUNT      = `KEY_COUNT,		//此处为16
+    parameter integer PRESS_CYCLES   = (`SYS_CLK_HZ / 1000) * `KEY_PRESS_MS,	//按下预设。表达的是2ms经过的周期数
+    parameter integer RELEASE_CYCLES = (`SYS_CLK_HZ / 1000) * `KEY_RELEASE_MS	//释放预设。这里是5ms。这两个数据将直接和后面的计数器进行比较
 )(
     input  logic                  sys_clk,
     input  logic                  rst_n,
@@ -44,12 +44,12 @@ module key_debounce #(
 );
 
     // 计数器要能装下两个阈值中较大的那个
-    localparam integer CNT_MAX = (PRESS_CYCLES > RELEASE_CYCLES)
-                                 ? PRESS_CYCLES : RELEASE_CYCLES;
-    localparam integer CNT_W   = (CNT_MAX <= 1) ? 1 : $clog2(CNT_MAX + 1);
+    localparam integer CNT_MAX = (PRESS_CYCLES > RELEASE_CYCLES)        //CNT_MAX的值是一个周期数，很大
+                                 ? PRESS_CYCLES : RELEASE_CYCLES;       //我觉得这里可以优化，完全没必要这个二选一，5ms的肯定是更大的
+    localparam integer CNT_W   = (CNT_MAX <= 1) ? 1 : $clog2(CNT_MAX + 1);  //需要几位宽来存储这个周期数？在这里算出来是十几位
 
     // 每个键一个独立计数器
-    logic [CNT_W-1:0] cnt [KEY_COUNT];
+    logic [CNT_W-1:0] cnt [KEY_COUNT];      //16个按键是一对一的计数器
 
     always_ff @(posedge sys_clk) begin
         if (!rst_n) begin
@@ -59,18 +59,22 @@ module key_debounce #(
             for (int i = 0; i < KEY_COUNT; i++) begin
                 cnt[i] <= '0;
             end
-        end else begin
+        end else begin                      //主行为块
             // 逐键独立处理；for 循环在综合时展开成 16 份并行逻辑
             for (int i = 0; i < KEY_COUNT; i++) begin
-                if (key_raw[i] != key_down[i]) begin
+                if (key_raw[i] != key_down[i]) begin            //举个例子，如果当前的初始情况下，key_down什么都没有而
+                                                                //key_raw已经由key_scan产生了输出，那么就会进入代码块
+                                                                //即两种状态发生接触
                     // 目标电平对应的确认时间：按下快、释放慢
-                    if ((key_raw[i] ? (cnt[i] + 1'b1 >= CNT_W'(PRESS_CYCLES))
-                                    : (cnt[i] + 1'b1 >= CNT_W'(RELEASE_CYCLES)))) begin
+                    if ((key_raw[i] ? (cnt[i] + 1'b1 >= CNT_W'(PRESS_CYCLES))   //如果raw有输入，判断一次当前此按键的计数器+1是否会大于按下预设
+                                    : (cnt[i] + 1'b1 >= CNT_W'(RELEASE_CYCLES)))) begin //如果raw不再有输入，判断一次当前此按键计数器+1是否大于释放预设
+                    //当前if是“承认新状态有效”
+
                         // 连续保持够久：承认新状态，并输出一个单周期边沿
-                        key_down[i] <= key_raw[i];
-                        cnt[i]      <= '0;
+                        key_down[i] <= key_raw[i];  //承认raw的输入的信号了
+                        cnt[i]      <= '0;          //已经承认这一次信号了，cnt清零
                         if (key_raw[i]) begin
-                            key_pressed[i]  <= 1'b1;
+                            key_pressed[i]  <= 1'b1;//刚刚只是承认有效，承认之后的一次才算输入进去。1/主频，根本感觉不到，不可能存在巧合
                             key_released[i] <= 1'b0;
                         end else begin
                             key_pressed[i]  <= 1'b0;
@@ -81,7 +85,7 @@ module key_debounce #(
                         cnt[i] <= cnt[i] + 1'b1;
                     end
                 end else begin
-                    // 输入与稳定状态一致：清计数，清脉冲
+                    // 输入与稳定状态一致：一直摁着，或者一直不摁。清计数，清脉冲
                     // （脉冲只在状态变化的那个时钟沿为 1）
                     cnt[i]          <= '0;
                     key_pressed[i]  <= 1'b0;

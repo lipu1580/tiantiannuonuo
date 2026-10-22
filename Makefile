@@ -6,7 +6,7 @@ RTL_DIR := rtl/audio
 TB_DIR := sim
 
 #目标与tb文件
-WAIT_TB_NAME := note_freq_lut
+WAIT_TB_NAME := adsr
 TB_NAME := tb_$(WAIT_TB_NAME)
 suffix := .sv
 RTL_FILE = $(wildcard rtl/audio/*.sv)

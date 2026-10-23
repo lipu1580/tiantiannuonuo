@@ -49,7 +49,7 @@
 `include "audio_defs.svh"
 
 module key_event_decoder #(
-    parameter integer     KEY_COUNT      = `KEY_COUNT,       // 按键数
+    parameter integer     KEY_COUNT      = `KEY_COUNT,       // 按键数，此处为16
     parameter integer     NOTE_KEY_COUNT = 12,               // 音符/根音键数
     parameter logic [6:0] BASE_NOTE      = `NOTE_BASE_C4,    // K0 起始音
     parameter logic [7:0] DEFAULT_VEL    = `DEFAULT_VELOCITY,// 力度缺失时的默认值
@@ -59,25 +59,25 @@ module key_event_decoder #(
     input  logic                    rst_n,
 
     // 按键边沿（单周期脉冲）与稳定状态
-    input  logic [KEY_COUNT-1:0]    key_pressed,
+    input  logic [KEY_COUNT-1:0]    key_pressed,		//16位宽，是从上一个模块出来的确定按下信号
     input  logic [KEY_COUNT-1:0]    key_released,
     input  logic [KEY_COUNT-1:0]    key_down,
     // 当前 FSR 力度，NOTE_ON 时锁存
-    input  logic [7:0]              velocity_in,
+    input  logic [7:0]              velocity_in,		//速度为8位，在最后的拼接打包数据的低八位
 
     // 事件请求（接 event_queue 写端口）
-    output logic                    event_req_valid,
-    input  logic                    event_req_ready,
-    output logic [1:0]              event_req_type,
-    output logic [6:0]              event_req_note,
-    output logic [7:0]              event_req_velocity,
+    output logic                    event_req_valid,	//我这里有时间要写
+    input  logic                    event_req_ready,	//你那边队列能不能接收？准备好了没有？
+    output logic [1:0]              event_req_type,		//事件类型
+    output logic [6:0]              event_req_note,		//MIDI音高编号
+    output logic [7:0]              event_req_velocity,	//敲击速度
 
     // 表情状态（送给 input_top 的表达式接口）
     output logic signed [3:0]       octave_offset, // -2~+2
     output logic [1:0]              waveform_sel,  // 0/1/2
 
     // 当前根音（已包含八度），供压电音符映射使用
-    output logic [6:0]              base_note,
+    output logic [6:0]              base_note,		//当前的根音也要传出去
 
     // 调试：当前按住的音符键
     output logic [KEY_COUNT-1:0]    active_note_mask
@@ -91,13 +91,14 @@ module key_event_decoder #(
     //   key_index 是 generate 常量，综合后等价于一张小查找表。
     //   同时把各功能标志汇总成 16 位掩码，方便用位运算判断“哪类键被按了”。
     //-------------------------------------------------------------------------
-    logic [6:0]  map_note        [KEY_COUNT];
-    logic        map_is_note     [KEY_COUNT];
+    logic [6:0]  map_note        [KEY_COUNT];	//前面是位宽，后面是生成多少个，也就是批量声明数组信号
+    logic        map_is_note     [KEY_COUNT];	//批量声明信号
     logic        map_all_off     [KEY_COUNT];
     logic        map_wave        [KEY_COUNT];
     logic        map_oct_up      [KEY_COUNT];
     logic        map_oct_down    [KEY_COUNT];
 
+	//下面五行其实是4x4键盘的逻辑分区
     logic [KEY_COUNT-1:0] note_key_mask;   // 哪些键是音符键
     logic [KEY_COUNT-1:0] all_off_mask;    // 哪些键是 ALL_NOTES_OFF
     logic [KEY_COUNT-1:0] wave_mask;       // 哪些键是波形切换
@@ -106,7 +107,7 @@ module key_event_decoder #(
 
     genvar g;
     generate
-        for (g = 0; g < KEY_COUNT; g++) begin : g_note_map
+        for (g = 0; g < KEY_COUNT; g++) begin : g_note_map	//g_note_map是这组生成块的名字
             note_map #(
                 .NOTE_KEY_COUNT (NOTE_KEY_COUNT),
                 .BASE_NOTE      (BASE_NOTE)

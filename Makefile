@@ -6,17 +6,20 @@ RTL_DIR := rtl/audio
 TB_DIR := sim
 
 #目标与tb文件
-RTL_NAME := sample_tick_gen
-TB_NAME := tb_sample_tick_gen
+WAIT_TB_NAME := voice
+TB_NAME := tb_$(WAIT_TB_NAME)
 suffix := .sv
-RTL_FILE = $(addsuffix $(suffix), $(RTL_NAME))
+RTL_FILE = $(wildcard rtl/audio/*.sv)
 TB_FILE = $(addsuffix $(suffix), $(TB_NAME))
 
-VFLAGS = --binary --timing --Wall
+VFLAGS = --binary --timing -Wno-fatal
 
-.PHONY: tick
+.PHONY: sim clean
 
-tick:
-	$(VERILATOR) $(VFLAGS) --top-module $(TB_NAME) --Mdir $(BUILF_DIR) $(RTL_DIR)/$(RTL_FILE) $(TB_DIR)/$(TB_FILE) $(BUILF_DIR)/V$(TB_NAME)
+sim:
+	mkdir -p $(BUILF_DIR)
+	$(VERILATOR) $(VFLAGS) --top-module $(TB_NAME) --Mdir $(BUILF_DIR) $(RTL_FILE) $(TB_DIR)/$(TB_FILE)
+	$(BUILF_DIR)/V$(TB_NAME)
 
-
+clean:
+	rm -rf build

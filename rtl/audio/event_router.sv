@@ -1,3 +1,5 @@
+`timescale 1ns/1ns
+
 module event_router #(
     parameter integer NOTE_W = 7 // 音符编号位宽
 )(

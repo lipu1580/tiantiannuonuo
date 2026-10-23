@@ -1,3 +1,5 @@
+`timescale 1ns/1ns
+
 module audio_core #(
     parameter integer VOICE_COUNT = 4,       // 复音声部数量
     parameter integer NOTE_W      = 7,       // 音符编号位宽

@@ -28,6 +28,7 @@ module adsr #(
     logic [7 : 0] pending_vel;
 
     always_comb begin : FSM
+    next_state = state;
         case (state)
             IDLE: begin
                 if (effective_cmd == CMD_ON) begin

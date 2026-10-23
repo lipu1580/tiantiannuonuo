@@ -29,8 +29,70 @@ module voice #(
     output logic                         active, // 声部仍处于发声/释放状态
     output logic [15:0]                  envelope_value // 当前包络电平
 );
-    // note_on/note_off 为 sys_clk 域的单周期命令，必须独立于 audio_ce 接收。
-    // note_on 时锁存 note_id/velocity；同周期 on/off 时 note_on 优先。
-    // sample_valid 每个采样请求产生一次；非活跃声部也输出有效的零样本。
-    // RELEASE 结束前 active 保持为 1。
+    logic signed [15:0] waveform_sample;
+    logic [PHASE_W-1:0] phase_increment;
+    logic [NOTE_W-1:0] lock_note_id;
+
+    note_freq_lut # (
+        .NOTE_W (NOTE_W),
+        .PHASE_W (PHASE_W),
+        .SAMPLE_RATE (SAMPLE_RATE)
+    ) DUT0 (
+        .note_id (lock_note_id),
+        .pitch_bend (pitch_bend),
+        .phase_increment (phase_increment)
+    );
+
+    dds_oscillator # (
+        .PHASE_W (PHASE_W),
+        .SAMPLE_W (SAMPLE_W),
+        .WAVE_ADDR_W (WAVE_ADDR_W)
+    ) DUT1 (
+        .sys_clk (sys_clk),
+        .rst_n (rst_n),
+        .audio_ce (audio_ce),
+        .phase_increment (phase_increment),
+        .waveform_sel (waveform_sel),
+        .waveform_sample (waveform_sample),
+        .waveform_valid (sample_valid)
+    );
+
+    adsr # (
+        .ATTACK_STEP (ATTACK_STEP),
+        .DECAY_STEP (DECAY_STEP),
+        .SUSTAIN_LEVEL (SUSTAIN_LEVEL),
+        .RELEASE_STEP (RELEASE_STEP)
+    ) DUT2 (
+        .sys_clk (sys_clk),
+        .rst_n (rst_n),
+        .audio_ce (audio_ce),
+        .note_on (note_on),
+        .note_off (note_off),
+        .velocity (velocity),
+        .expression (expression),
+        .envelope_value (envelope_value),
+        .active (active)
+    );
+
+    logic signed [SAMPLE_W+16:0] sample_product;
+    logic [15:0] saved_envelope;
+
+    assign sample_product = waveform_sample * $signed({1'b0, saved_envelope});
+    assign voice_sample = OUTPUT_W'(sample_product >>> 16);
+
+    always_ff @(posedge sys_clk) begin
+    if (!rst_n)
+        lock_note_id <= '0;
+    else if (note_on)
+        lock_note_id <= note_id;
+    end
+
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n) begin
+            saved_envelope <= 'd0;
+        end
+        else if (audio_ce) begin
+            saved_envelope <= envelope_value;
+        end
+    end
 endmodule

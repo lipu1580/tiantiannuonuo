@@ -30,8 +30,9 @@ ADS7830 ADC ──┘                 └► expr_*  (expression/pitch_bend/wave
 .
 ├── rtl/
 │   ├── common/
-│   │   ├── audio_defs.svh          # 事件编码、波形编码（公共协议）
-│   │   └── project_params.svh      # 27 MHz、48 kHz、声部数、输入参数
+│   │   ├── audio_defs.svh          # audio_defs_pkg：事件/波形编码
+│   │   ├── project_params.svh      # project_params_pkg：时钟、音频、输入参数
+│   │   └── packages.sv             # 公共 package 编译入口
 │   └── input/                      # 成员 2
 │       ├── input_top.sv            # ★ 唯一公开顶层
 │       ├── key_scan.sv             # 4x4 行扫描
@@ -154,10 +155,11 @@ assign adc_sda_i = adc_sda;
    若希望用 K15 切换演示模式，可在板级顶层把 `key_down[15]` 接到模式
    选择逻辑，不需要修改事件协议。
 
-3. **`rtl/common/audio_defs.svh` 与 `project_params.svh` 是兼容副本。**
-   原始“所有参数标准”文件未同步进本仓库，本副本严格按任务书 V1.0 的
-   编码/位宽编写。若成员 1 的正式版本使用 package 或不同宏名，请以正式
-   文件为准并同步替换；事件编码与位宽不得改变。
+3. **公共参数已统一为 package 风格。**
+   `rtl/common/audio_defs.svh` 提供 `audio_defs_pkg`，
+   `rtl/common/project_params.svh` 提供 `project_params_pkg`，
+   `rtl/common/packages.sv` 是编译入口。输入模块通过 `import` 或
+   `package::参数` 引用，不再使用宏；事件编码与位宽保持不变。
 
 4. **消抖时间默认 2 ms 按下 / 5 ms 释放**，而不是任务书建议的 5~20 ms。
    这是为了给“控制到音频输出 ≤ 10 ms”留出余量：输入侧最坏约 3 ms，

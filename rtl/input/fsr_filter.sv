@@ -29,11 +29,9 @@
 //   velocity 是寄存器输出，更新率约 1.4 kHz；按键按下时由
 //   key_event_decoder 锁存当时的值，因此不需要在音乐速率上更新。
 //=============================================================================
-`include "project_params.svh"
-
 module fsr_filter #(
-    parameter integer FILTER_SHIFT = `FSR_FILTER_SHIFT, // alpha = 1/2^SHIFT
-    parameter logic [7:0] NOISE_GATE = `FSR_NOISE_GATE, // 无压力上限
+    parameter integer FILTER_SHIFT = project_params_pkg::FSR_FILTER_SHIFT, // alpha = 1/2^SHIFT
+    parameter logic [7:0] NOISE_GATE = project_params_pkg::FSR_NOISE_GATE, // 无压力上限
     parameter integer GATE_HYST    = 2,                 // 迟滞回差
     // 起音加速：新样本比滤波值高超过该阈值时直接跟随，
     // 保证按键瞬间的力度响应；释放仍使用指数滤波。

@@ -22,8 +22,6 @@
 //   FIFO 满时继续写：写入被忽略，overflow 置 1 并保持（锁存），
 //   直到 overflow_clear 或复位。已入队的事件不会被覆盖。
 //=============================================================================
-`include "audio_defs.svh"
-
 module event_queue #(
     parameter integer DEPTH  = 8,   // FIFO 深度
     parameter integer NOTE_W = 7    // MIDI 音符位宽

@@ -16,6 +16,7 @@ VERILATOR ?= verilator
 BUILD     := build
 RTL_DIR   := rtl/input
 COMMON    := rtl/common
+PKG       := $(COMMON)/packages.sv
 RTL       := $(wildcard $(RTL_DIR)/*.sv)
 MODEL     := sim/ads7830_model.sv
 INC       := -I$(COMMON)
@@ -43,14 +44,14 @@ help:
 
 lint:
 	$(VERILATOR) --lint-only -Wall -Wno-fatal -Wno-PINCONNECTEMPTY \
-		$(INC) --top-module input_top $(RTL)
+		$(INC) --top-module input_top $(PKG) $(RTL)
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
 # 每个 testbench 一个可执行文件；ads7830_model 对所有 TB 一起编译（未使用无副作用）
-$(BUILD)/%.vvp: sim/%.sv $(RTL) $(MODEL) | $(BUILD)
-	$(IVERILOG) -g2012 $(INC) -s $* -o $@ $< $(RTL) $(MODEL)
+$(BUILD)/%.vvp: sim/%.sv $(PKG) $(RTL) $(MODEL) | $(BUILD)
+	$(IVERILOG) -g2012 $(INC) -s $* -o $@ $< $(PKG) $(RTL) $(MODEL)
 
 sim: $(addprefix $(BUILD)/,$(addsuffix .vvp,$(TBS)))
 	@set -e; \

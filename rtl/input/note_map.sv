@@ -15,12 +15,9 @@
 //   按键排列是最容易改的东西。把映射集中在这里，扫描/消抖/事件协议
 //   都不用动。改键位只改本文件。
 //=============================================================================
-`include "project_params.svh"
-`include "audio_defs.svh"
-
 module note_map #(
     parameter integer     NOTE_KEY_COUNT = 12,          // 前 12 个键是音符键
-    parameter logic [6:0] BASE_NOTE      = `NOTE_BASE_C4 // K0 的 MIDI 音符，默认 60
+    parameter logic [6:0] BASE_NOTE      = project_params_pkg::NOTE_BASE_C4 // K0 的 MIDI 音符，默认 60
 )(
     input  logic [3:0]        key_index,     // 物理键号 0~15
     input  logic signed [3:0] octave_offset, // 八度偏移 -2~+2

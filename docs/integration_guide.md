@@ -13,8 +13,8 @@
 ## 1. 顶层信号
 
 ```systemverilog
-`include "project_params.svh"
-`include "audio_defs.svh"
+import project_params_pkg::*;
+import audio_defs_pkg::*;
 
 module tang_nano20k_top (
     input  logic        sys_clk,      // 27 MHz
@@ -82,7 +82,7 @@ module tang_nano20k_top (
     assign adc_sda_i = adc_sda;
 
     input_top #(
-        .SYS_CLK_HZ (`SYS_CLK_HZ),
+        .SYS_CLK_HZ (SYS_CLK_HZ),
         .MATRIX_MODE (1)          // 1=矩阵选根音/音区，5 路压电触发
     ) u_input_top (
         .sys_clk        (sys_clk),
@@ -130,9 +130,9 @@ module tang_nano20k_top (
     logic [3:0]  voice_active;
 
     audio_core #(
-        .VOICE_COUNT (`VOICE_COUNT),
-        .NOTE_W      (`NOTE_W),
-        .SAMPLE_W    (`SAMPLE_W)
+        .VOICE_COUNT (VOICE_COUNT),
+        .NOTE_W      (NOTE_W),
+        .SAMPLE_W    (SAMPLE_W)
     ) u_audio_core (
         .sys_clk        (sys_clk),
         .rst_n          (rst_n),

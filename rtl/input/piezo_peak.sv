@@ -53,18 +53,19 @@
 //   - 5 个事件 pending 槽位
 //   对 Tang Nano 20K 来说资源很小。
 //=============================================================================
-`include "project_params.svh"
-`include "audio_defs.svh"
+import audio_defs_pkg::EVENT_NOP;
+import audio_defs_pkg::EVENT_NOTE_ON;
+import audio_defs_pkg::EVENT_NOTE_OFF;
 
 module piezo_peak #(
     // 固定 5 路压电。这里刻意不用 PIEZO_COUNT 作为参数名，
-    // 因为 project_params.svh 里已有同名宏，预处理会冲突。
+    // 因为 project params package 里已有同名参数。
     parameter integer NUM_PIEZO         = 5,
-    parameter integer SYS_CLK_HZ       = `SYS_CLK_HZ,           // 27 MHz
-    parameter logic [7:0] THRESHOLD    = `PIEZO_THRESHOLD,      // 触发阈值
-    parameter integer NOTE_OFF_MS      = `PIEZO_NOTE_OFF_MS,    // 自动 NOTE_OFF 时间
-    parameter integer RETRIGGER_MS     = `PIEZO_RETRIGGER_MS,   // 防重复触发窗口
-    parameter integer PEAK_RST_CYCLES  = `PIEZO_PEAK_RST_CYCLES,// 峰值电容放电脉冲
+    parameter integer SYS_CLK_HZ       = project_params_pkg::SYS_CLK_HZ,           // 27 MHz
+    parameter logic [7:0] THRESHOLD    = project_params_pkg::PIEZO_THRESHOLD,      // 触发阈值
+    parameter integer NOTE_OFF_MS      = project_params_pkg::PIEZO_NOTE_OFF_MS,    // 自动 NOTE_OFF 时间
+    parameter integer RETRIGGER_MS     = project_params_pkg::PIEZO_RETRIGGER_MS,   // 防重复触发窗口
+    parameter integer PEAK_RST_CYCLES  = project_params_pkg::PIEZO_PEAK_RST_CYCLES,// 峰值电容放电脉冲
     parameter integer NOTE_W           = 7
 )(
     input  logic                    sys_clk,
@@ -202,7 +203,7 @@ module piezo_peak #(
     //-------------------------------------------------------------------------
     always_comb begin
         event_req_valid    = 1'b0;
-        event_req_type     = `EVENT_NOP;
+        event_req_type     = EVENT_NOP;
         event_req_note     = '0;
         event_req_velocity = 8'd0;
         sel                = '0;
@@ -241,7 +242,7 @@ module piezo_peak #(
                 retrig_timer[i] <= '0;
                 rst_timer[i]    <= '0;
                 peak_q[i]       <= 8'd0;
-                pend_type[i]    <= `EVENT_NOP;
+                pend_type[i]    <= EVENT_NOP;
                 pend_note[i]    <= '0;
                 pend_vel[i]     <= 8'd0;
             end
@@ -272,7 +273,7 @@ module piezo_peak #(
                     off_timer[i] <= off_timer[i] - 1'b1;
                     if ((off_timer[i] == 1) && active_q[i]) begin
                         pend_valid[i] <= 1'b1;
-                        pend_type[i]  <= `EVENT_NOTE_OFF;
+                        pend_type[i]  <= EVENT_NOTE_OFF;
                         pend_note[i]  <= note_latched[i];
                         pend_vel[i]   <= 8'd0;
                         active_q[i]   <= 1'b0;
@@ -302,7 +303,7 @@ module piezo_peak #(
                             note_latched[i] <= calc_note(i, base_note);
 
                             pend_valid[i] <= 1'b1;
-                            pend_type[i]  <= `EVENT_NOTE_ON;
+                            pend_type[i]  <= EVENT_NOTE_ON;
                             pend_note[i]  <= calc_note(i, base_note);
                             pend_vel[i]   <= calc_velocity(sample_data);
 

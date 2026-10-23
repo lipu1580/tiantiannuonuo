@@ -23,14 +23,12 @@
 //   - 不解释按键含义（note_map.sv 负责）
 //   - 不做按键按下/释放边沿（key_debounce.sv 负责）
 //=============================================================================
-`include "project_params.svh"
-
 module key_scan #(
-    parameter integer SYS_CLK_HZ     = `SYS_CLK_HZ,   // 系统时钟
-    parameter integer ROW_COUNT      = `KEY_ROW_COUNT, // 行数
-    parameter integer COL_COUNT      = `KEY_COL_COUNT, // 列数
+    parameter integer SYS_CLK_HZ     = project_params_pkg::SYS_CLK_HZ,   // 系统时钟
+    parameter integer ROW_COUNT      = project_params_pkg::KEY_ROW_COUNT, // 行数
+    parameter integer COL_COUNT      = project_params_pkg::KEY_COL_COUNT, // 列数
     // 默认整帧刷新率 2 kHz，即单行驻留 125 us
-    parameter integer ROW_DWELL_CYC  = SYS_CLK_HZ / (`MATRIX_FRAME_HZ * ROW_COUNT), //每行停留多少拍
+    parameter integer ROW_DWELL_CYC  = SYS_CLK_HZ / (project_params_pkg::MATRIX_FRAME_HZ * ROW_COUNT), //每行停留多少拍
     parameter integer SETTLE_CYC     = 8,             // 行切换后的等待拍数
     // 行/列有效电平：1 表示低有效（配合外部上拉）
     parameter logic   ROW_ACTIVE_LOW = 1'b1,

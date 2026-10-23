@@ -50,11 +50,9 @@
 // 【限制】
 //   不支持 I2C 时钟拉伸（ADS7830 不需要）；SDA 只拉低，不主动输出高。
 //=============================================================================
-`include "project_params.svh"
-
 module adc_ads7830 #(
-    parameter integer SYS_CLK_HZ  = `SYS_CLK_HZ,               // 系统时钟
-    parameter integer I2C_HZ      = `ADC_I2C_HZ,               // 目标 I2C 速率
+    parameter integer SYS_CLK_HZ  = project_params_pkg::SYS_CLK_HZ,   // 系统时钟
+    parameter integer I2C_HZ      = project_params_pkg::ADC_I2C_HZ,   // 目标 I2C 速率
     parameter integer QUARTER_DIV = SYS_CLK_HZ / (I2C_HZ * 4), // 1/4 位周期
     parameter logic [6:0] SLV_ADDR = 7'h48                      // ADS7830 地址
 )(

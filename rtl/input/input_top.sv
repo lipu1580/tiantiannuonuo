@@ -41,16 +41,16 @@
 //   5. 成员 1 的 audio_core 内部也有测试音源，两套 test_mode 不要同时打开。
 //   6. 事件优先级：ALL_NOTES_OFF > 压电触发 > 矩阵按键。
 //=============================================================================
-`include "project_params.svh"
-`include "audio_defs.svh"
+import audio_defs_pkg::EVENT_ALL_NOTES_OFF;
+import audio_defs_pkg::DEFAULT_VELOCITY;
 
 module input_top #(
     //-------------------------------------------------------------------------
     // 系统/矩阵规模
     //-------------------------------------------------------------------------
-    parameter integer SYS_CLK_HZ       = `SYS_CLK_HZ,           // 系统时钟 27 MHz
-    parameter integer ROW_COUNT        = `KEY_ROW_COUNT,        // 矩阵行数，默认 4
-    parameter integer COL_COUNT        = `KEY_COL_COUNT,        // 矩阵列数，默认 4
+    parameter integer SYS_CLK_HZ       = project_params_pkg::SYS_CLK_HZ,           // 系统时钟 27 MHz
+    parameter integer ROW_COUNT        = project_params_pkg::KEY_ROW_COUNT,        // 矩阵行数，默认 4
+    parameter integer COL_COUNT        = project_params_pkg::KEY_COL_COUNT,        // 矩阵列数，默认 4
     parameter integer KEY_COUNT        = ROW_COUNT * COL_COUNT, // 总按键数，默认 16
 
     //-------------------------------------------------------------------------
@@ -58,9 +58,9 @@ module input_top #(
     //   ROW_DWELL_CYC = 27e6 / (2000 * 4) = 3375 拍 ≈ 125 us/行
     //   整帧 = 4 * 125 us = 500 us，即矩阵刷新率 2 kHz
     //-------------------------------------------------------------------------
-    parameter integer ROW_DWELL_CYC    = SYS_CLK_HZ / (`MATRIX_FRAME_HZ * ROW_COUNT),
-    parameter integer PRESS_CYCLES     = (SYS_CLK_HZ / 1000) * `KEY_PRESS_MS,   // 2 ms
-    parameter integer RELEASE_CYCLES   = (SYS_CLK_HZ / 1000) * `KEY_RELEASE_MS, // 5 ms
+    parameter integer ROW_DWELL_CYC    = SYS_CLK_HZ / (project_params_pkg::MATRIX_FRAME_HZ * ROW_COUNT),
+    parameter integer PRESS_CYCLES     = (SYS_CLK_HZ / 1000) * project_params_pkg::KEY_PRESS_MS,   // 2 ms
+    parameter integer RELEASE_CYCLES   = (SYS_CLK_HZ / 1000) * project_params_pkg::KEY_RELEASE_MS, // 5 ms
     parameter logic   ROW_ACTIVE_LOW   = 1'b1,  // 行低有效：当前扫描行输出 0
     parameter logic   COL_ACTIVE_LOW   = 1'b1,  // 列低有效：按下时列被拉低
 
@@ -75,16 +75,16 @@ module input_top #(
     //       单次 I2C 事务（地址+命令+读）约 100 us，加 20 us 间隔
     //       一轮 7 通道约 0.84 ms
     //-------------------------------------------------------------------------
-    parameter integer I2C_QUARTER_DIV  = SYS_CLK_HZ / (`ADC_I2C_HZ * 4),
-    parameter integer SAMPLE_INTERVAL  = SYS_CLK_HZ / (1_000_000 / `ADC_SAMPLE_INTERVAL_US),
-    parameter logic [2:0] FSR_CHANNEL  = `FSR_ADC_CHANNEL,      // FSR 接 CH0
-    parameter logic [2:0] POT_CHANNEL  = `POT_ADC_CHANNEL,      // 电位器接 CH1
+    parameter integer I2C_QUARTER_DIV  = SYS_CLK_HZ / (project_params_pkg::ADC_I2C_HZ * 4),
+    parameter integer SAMPLE_INTERVAL  = SYS_CLK_HZ / (1_000_000 / project_params_pkg::ADC_SAMPLE_INTERVAL_US),
+    parameter logic [2:0] FSR_CHANNEL  = project_params_pkg::FSR_ADC_CHANNEL,      // FSR 接 CH0
+    parameter logic [2:0] POT_CHANNEL  = project_params_pkg::POT_ADC_CHANNEL,      // 电位器接 CH1
 
     //-------------------------------------------------------------------------
     // 事件与音符
     //-------------------------------------------------------------------------
-    parameter integer EVENT_FIFO_DEPTH = `EVENT_FIFO_DEPTH,     // 事件 FIFO 深度，默认 8
-    parameter logic [6:0] BASE_NOTE    = `NOTE_BASE_C4,         // K0 对应 MIDI 60 (C4)
+    parameter integer EVENT_FIFO_DEPTH = project_params_pkg::EVENT_FIFO_DEPTH,     // 事件 FIFO 深度，默认 8
+    parameter logic [6:0] BASE_NOTE    = project_params_pkg::NOTE_BASE_C4,         // K0 对应 MIDI 60 (C4)
 
     //-------------------------------------------------------------------------
     // 矩阵/压电演奏模式
@@ -95,12 +95,12 @@ module input_top #(
 
     //-------------------------------------------------------------------------
     // 5 路压电输入
-    //   注意参数名不能和 project_params.svh 的宏同名，否则宏展开会冲突。
+    //   参数名不能和 package 参数同名，否则会在模块内遮蔽。
     //-------------------------------------------------------------------------
-    parameter logic [2:0] PIEZO_BASE_CH = `PIEZO_ADC_CHANNEL_BASE, // P0 所在 ADC 通道
-    parameter logic [7:0] PIEZO_THRESH  = `PIEZO_THRESHOLD,        // 全局触发阈值
-    parameter integer PIEZO_OFF_MS     = `PIEZO_NOTE_OFF_MS,      // 自动 NOTE_OFF 时间
-    parameter integer PIEZO_RETRIG_MS  = `PIEZO_RETRIGGER_MS      // 防重复触发窗口
+    parameter logic [2:0] PIEZO_BASE_CH = project_params_pkg::PIEZO_ADC_CHANNEL_BASE, // P0 所在 ADC 通道
+    parameter logic [7:0] PIEZO_THRESH  = project_params_pkg::PIEZO_THRESHOLD,        // 全局触发阈值
+    parameter integer PIEZO_OFF_MS     = project_params_pkg::PIEZO_NOTE_OFF_MS,      // 自动 NOTE_OFF 时间
+    parameter integer PIEZO_RETRIG_MS  = project_params_pkg::PIEZO_RETRIGGER_MS      // 防重复触发窗口
 )(
     //-------------------------------------------------------------------------
     // 时钟与复位（整颗模块单时钟域）
@@ -319,8 +319,8 @@ module input_top #(
     logic       fsr_ready;      // FSR 是否完成过至少一次采样
 
     fsr_filter #(
-        .FILTER_SHIFT (`FSR_FILTER_SHIFT),
-        .NOISE_GATE   (`FSR_NOISE_GATE)
+        .FILTER_SHIFT (project_params_pkg::FSR_FILTER_SHIFT),
+        .NOISE_GATE   (project_params_pkg::FSR_NOISE_GATE)
     ) u_fsr (
         .sys_clk        (sys_clk),
         .rst_n          (rst_n),
@@ -338,7 +338,7 @@ module input_top #(
     // 按下瞬间若 FSR 尚未稳定（例如刚上电），使用默认力度 128，
     // 避免发出 velocity=0 的“听不见的 NOTE_ON”。
     logic [7:0] note_velocity;
-    assign note_velocity = pressure_valid ? fsr_velocity : `DEFAULT_VELOCITY;
+    assign note_velocity = pressure_valid ? fsr_velocity : DEFAULT_VELOCITY;
 
     //-------------------------------------------------------------------------
     // 表情：电位器 -> pitch_bend，按键 -> 波形选择
@@ -447,7 +447,7 @@ module input_top #(
         .THRESHOLD       (PIEZO_THRESH),
         .NOTE_OFF_MS     (PIEZO_OFF_MS),
         .RETRIGGER_MS    (PIEZO_RETRIG_MS),
-        .PEAK_RST_CYCLES (`PIEZO_PEAK_RST_CYCLES)
+        .PEAK_RST_CYCLES (project_params_pkg::PIEZO_PEAK_RST_CYCLES)
     ) u_piezo (
         .sys_clk            (sys_clk),
         .rst_n              (rst_n),
@@ -477,7 +477,7 @@ module input_top #(
         matrix_sel = 1'b0;
         piezo_sel  = 1'b0;
 
-        if (matrix_req_valid && (matrix_req_type == `EVENT_ALL_NOTES_OFF)) begin
+        if (matrix_req_valid && (matrix_req_type == EVENT_ALL_NOTES_OFF)) begin
             matrix_sel = 1'b1;
         end else if (piezo_req_valid) begin
             piezo_sel = 1'b1;
@@ -497,7 +497,7 @@ module input_top #(
 
     // ALL_OFF 被 FIFO 接收的同拍，通知 piezo_peak 清活跃状态/待发事件
     assign piezo_all_off = matrix_req_valid &&
-                           (matrix_req_type == `EVENT_ALL_NOTES_OFF) &&
+                           (matrix_req_type == EVENT_ALL_NOTES_OFF) &&
                            matrix_req_ready;
 
     //-------------------------------------------------------------------------

@@ -1,38 +1,48 @@
 //=============================================================================
 // 文件      : audio_defs.svh
-// 归属      : 三人公共接口定义（成员 1 起草，成员 2/3 只使用不修改）
-// 说明      : 本文件是团队公共协议的本仓库副本。比赛版本若由成员 1 更新，
-//             请保持 EVENT_* 编码与位宽不变，否则会破坏 input_top -> audio_core
-//             的握手兼容性。
-//
-// 注意      : 若成员 1 提供的正式 audio_defs.svh 使用 package 或 localparam
-//             形式，请以正式文件为准；本副本仅保证与任务书 V1.0 的编码一致。
+// 归属      : 三人公共接口定义（成员 1 起草，三人共同维护）
+// 说明      : 统一使用 package，不再使用宏定义。
+//             成员 2 的输入模块通过 import audio_defs_pkg::*; 使用本文件。
 //=============================================================================
 `ifndef AUDIO_DEFS_SVH
 `define AUDIO_DEFS_SVH
 
-//--------------------------------------------------------------------------
-// 演奏事件编码（公共协议，禁止成员 2 自行重新定义）
-//--------------------------------------------------------------------------
-`define EVENT_NOP             2'b00
-`define EVENT_NOTE_ON         2'b01
-`define EVENT_NOTE_OFF        2'b10
-`define EVENT_ALL_NOTES_OFF   2'b11
+/* verilator lint_off DECLFILENAME */
+/* verilator lint_off UNUSEDPARAM */
+package audio_defs_pkg;
+    // valid && ready 在 sys_clk 上升沿接受一次事件；阻塞时保持 valid 和字段。
+    // NOP 消耗一次握手但不改变声部；ALL_NOTES_OFF 进入 RELEASE。
+    typedef enum logic [1:0] {
+        EVENT_NOP           = 2'b00, // 空操作
+        EVENT_NOTE_ON       = 2'b01, // 触发指定音符
+        EVENT_NOTE_OFF      = 2'b10, // 释放指定音符
+        EVENT_ALL_NOTES_OFF = 2'b11  // 释放全部音符
+    } event_type_t;
 
-// 事件打包位宽：type(2) + note_id(7) + velocity(8)
-`define EVENT_W               17
+    typedef enum logic [1:0] {
+        WAVE_SINE     = 2'b00, // 正弦波
+        WAVE_SQUARE   = 2'b01, // 方波
+        WAVE_SAWTOOTH = 2'b10, // 锯齿波
+        WAVE_RESERVED = 2'b11  // 保留/静音
+    } waveform_t;
 
-//--------------------------------------------------------------------------
-// 波形选择编码（表情接口 waveform_sel）
-//--------------------------------------------------------------------------
-`define WAVE_SINE             2'b00
-`define WAVE_SQUARE           2'b01
-`define WAVE_SAW              2'b10
-`define WAVE_RESERVED         2'b11
+    // 事件打包位宽：type(2) + note_id(7) + velocity(8)
+    localparam integer EVENT_W = 17;
 
-//--------------------------------------------------------------------------
-// 默认值
-//--------------------------------------------------------------------------
-`define DEFAULT_VELOCITY      8'd128
+    // 力度缺失时的默认值
+    localparam logic [7:0] DEFAULT_VELOCITY = 8'd128;
+
+    // 仅固定规范第 11 节的扩展地址，基础版暂不暴露配置总线。
+    localparam logic [7:0] CFG_MASTER_GAIN   = 8'h00; // 主音量配置地址
+    localparam logic [7:0] CFG_ATTACK_STEP   = 8'h04; // 包络起音步长地址
+    localparam logic [7:0] CFG_DECAY_STEP    = 8'h08; // 包络衰减步长地址
+    localparam logic [7:0] CFG_SUSTAIN_LEVEL = 8'h0C; // 包络延音电平地址
+    localparam logic [7:0] CFG_RELEASE_STEP  = 8'h10; // 包络释放步长地址
+    localparam logic [7:0] CFG_WAVEFORM_SEL  = 8'h14; // 波形选择地址
+    localparam logic [7:0] CFG_TEST_MODE     = 8'h18; // 测试模式地址
+    localparam logic [7:0] CFG_ACTIVE_VOICES = 8'h1C; // 活跃声部只读地址
+endpackage
+/* verilator lint_on UNUSEDPARAM */
+/* verilator lint_on DECLFILENAME */
 
 `endif // AUDIO_DEFS_SVH

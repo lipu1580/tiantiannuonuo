@@ -45,14 +45,19 @@
 //   root_pitch_class 由 K0~K11 在 MATRIX_MODE=1 时更新：
 //     K0 -> 0 (C), K1 -> 1 (C#), ... K11 -> 11 (B)
 //=============================================================================
-`include "project_params.svh"
-`include "audio_defs.svh"
+import audio_defs_pkg::EVENT_NOP;
+import audio_defs_pkg::EVENT_NOTE_ON;
+import audio_defs_pkg::EVENT_NOTE_OFF;
+import audio_defs_pkg::EVENT_ALL_NOTES_OFF;
+import audio_defs_pkg::WAVE_SINE;
+import audio_defs_pkg::WAVE_SAWTOOTH;
+import audio_defs_pkg::DEFAULT_VELOCITY;
 
 module key_event_decoder #(
-    parameter integer     KEY_COUNT      = `KEY_COUNT,       // 按键数，此处为16
+    parameter integer     KEY_COUNT      = project_params_pkg::KEY_COUNT,       // 按键数，此处为16
     parameter integer     NOTE_KEY_COUNT = 12,               // 音符/根音键数
-    parameter logic [6:0] BASE_NOTE      = `NOTE_BASE_C4,    // K0 起始音
-    parameter logic [7:0] DEFAULT_VEL    = `DEFAULT_VELOCITY,// 力度缺失时的默认值
+    parameter logic [6:0] BASE_NOTE      = project_params_pkg::NOTE_BASE_C4,    // K0 起始音
+    parameter logic [7:0] DEFAULT_VEL    = audio_defs_pkg::DEFAULT_VELOCITY,// 力度缺失时的默认值
     parameter integer     MATRIX_MODE    = 0                 // 0=键盘模式 1=配置模式
 )(
     input  logic                    sys_clk,
@@ -179,10 +184,10 @@ module key_event_decoder #(
             pend_all_off     <= 1'b0;
             suppress_release <= '0;
             octave_offset    <= 4'sd0;
-            waveform_sel     <= `WAVE_SINE;
+            waveform_sel     <= WAVE_SINE;
             root_pitch_class <= 4'd0;   // 默认 C
             for (int i = 0; i < KEY_COUNT; i++) begin
-                pend_type[i]    <= `EVENT_NOP;
+                pend_type[i]    <= EVENT_NOP;
                 pend_note[i]    <= 7'd0;
                 pend_vel[i]     <= 8'd0;
                 latched_note[i] <= 7'd0;
@@ -213,7 +218,7 @@ module key_event_decoder #(
                         // 按下：锁存音符，填入 NOTE_ON 槽位
                         latched_note[i] <= map_note[i];
                         pend_valid[i]   <= 1'b1;
-                        pend_type[i]    <= `EVENT_NOTE_ON;
+                        pend_type[i]    <= EVENT_NOTE_ON;
                         pend_note[i]    <= map_note[i];
                         // velocity=0 会被成员 1 当作无声，这里兜底为默认力度
                         pend_vel[i]     <= (velocity_in == 8'd0) ? DEFAULT_VEL
@@ -232,7 +237,7 @@ module key_event_decoder #(
                         suppress_release[i] <= 1'b0;
                     end else begin
                         pend_valid[i] <= 1'b1;
-                        pend_type[i]  <= `EVENT_NOTE_OFF;
+                        pend_type[i]  <= EVENT_NOTE_OFF;
                         pend_note[i]  <= latched_note[i]; // 用按下时锁存的音高
                         pend_vel[i]   <= 8'd0;
                     end
@@ -250,8 +255,8 @@ module key_event_decoder #(
             end
             if (press_wave) begin
                 // 0 -> 1 -> 2 -> 0，3 保留
-                waveform_sel <= (waveform_sel == `WAVE_SAW) ? `WAVE_SINE
-                                                            : waveform_sel + 1'b1;
+                waveform_sel <= (waveform_sel == WAVE_SAWTOOTH) ? WAVE_SINE
+                                                                : waveform_sel + 1'b1;
             end
 
             // ALL_NOTES_OFF 最后执行，保证同周期普通事件被清除：
@@ -273,7 +278,7 @@ module key_event_decoder #(
     //-------------------------------------------------------------------------
     always_comb begin
         event_req_valid    = 1'b0;
-        event_req_type     = `EVENT_NOP;
+        event_req_type     = EVENT_NOP;
         event_req_note     = 7'd0;
         event_req_velocity = 8'd0;
         event_req_sel      = '0;
@@ -281,7 +286,7 @@ module key_event_decoder #(
         if (pend_all_off) begin
             // ALL_OFF 最高优先级；sel=0 是它的专用编号
             event_req_valid = 1'b1;
-            event_req_type  = `EVENT_ALL_NOTES_OFF;
+            event_req_type  = EVENT_ALL_NOTES_OFF;
             event_req_sel   = '0;
         end else begin
             // 倒序扫描，使最小键号拥有最高优先级

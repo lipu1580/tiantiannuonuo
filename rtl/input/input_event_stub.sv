@@ -28,11 +28,13 @@
 //   只能二选一：用本模块时 audio_core.test_mode 必须为 0。
 //   本模块只产生事件，不产生 PCM，也不能绕过 audio_core。
 //=============================================================================
-`include "project_params.svh"
-`include "audio_defs.svh"
+import audio_defs_pkg::EVENT_NOP;
+import audio_defs_pkg::EVENT_NOTE_ON;
+import audio_defs_pkg::EVENT_NOTE_OFF;
+import audio_defs_pkg::EVENT_ALL_NOTES_OFF;
 
 module input_event_stub #(
-    parameter integer SYS_CLK_HZ = `SYS_CLK_HZ,        // 系统时钟
+    parameter integer SYS_CLK_HZ = project_params_pkg::SYS_CLK_HZ, // 系统时钟
     parameter logic [7:0] TEST_VELOCITY = 8'd180       // 默认测试力度
 )(
     input  logic       sys_clk,
@@ -87,7 +89,7 @@ module input_event_stub #(
     logic [4:0]  seq_idx;
 
     always_comb begin
-        entry   = {16'd0, `EVENT_NOP, 7'd0, 8'd0};
+        entry   = {16'd0, EVENT_NOP, 7'd0, 8'd0};
         seq_len = 5'd1;
 
         case (test_pattern)
@@ -100,16 +102,16 @@ module input_event_stub #(
             2'd0: begin
                 seq_len = 5'd9;
                 case (seq_idx)
-                    5'd0: entry = {16'd100,  `EVENT_NOTE_ON,  7'd60, TEST_VELOCITY};
-                    5'd1: entry = {16'd200,  `EVENT_NOTE_ON,  7'd64, TEST_VELOCITY};
-                    5'd2: entry = {16'd300,  `EVENT_NOTE_ON,  7'd67, TEST_VELOCITY};
-                    5'd3: entry = {16'd400,  `EVENT_NOTE_ON,  7'd72, TEST_VELOCITY};
-                    5'd4: entry = {16'd1000, `EVENT_NOTE_OFF, 7'd60, 8'd0};
-                    5'd5: entry = {16'd1100, `EVENT_NOTE_OFF, 7'd64, 8'd0};
-                    5'd6: entry = {16'd1200, `EVENT_NOTE_OFF, 7'd67, 8'd0};
-                    5'd7: entry = {16'd1300, `EVENT_NOTE_OFF, 7'd72, 8'd0};
-                    5'd8: entry = {16'd1500, `EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
-                    default: entry = {16'd1500, `EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
+                    5'd0: entry = {16'd100,  EVENT_NOTE_ON,  7'd60, TEST_VELOCITY};
+                    5'd1: entry = {16'd200,  EVENT_NOTE_ON,  7'd64, TEST_VELOCITY};
+                    5'd2: entry = {16'd300,  EVENT_NOTE_ON,  7'd67, TEST_VELOCITY};
+                    5'd3: entry = {16'd400,  EVENT_NOTE_ON,  7'd72, TEST_VELOCITY};
+                    5'd4: entry = {16'd1000, EVENT_NOTE_OFF, 7'd60, 8'd0};
+                    5'd5: entry = {16'd1100, EVENT_NOTE_OFF, 7'd64, 8'd0};
+                    5'd6: entry = {16'd1200, EVENT_NOTE_OFF, 7'd67, 8'd0};
+                    5'd7: entry = {16'd1300, EVENT_NOTE_OFF, 7'd72, 8'd0};
+                    5'd8: entry = {16'd1500, EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
+                    default: entry = {16'd1500, EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
                 endcase
             end
 
@@ -120,23 +122,23 @@ module input_event_stub #(
             2'd1: begin
                 seq_len = 5'd16;
                 case (seq_idx)
-                    5'd0:  entry = {16'd100,  `EVENT_NOTE_ON,  7'd60, TEST_VELOCITY};
-                    5'd1:  entry = {16'd250,  `EVENT_NOTE_ON,  7'd62, TEST_VELOCITY};
-                    5'd2:  entry = {16'd400,  `EVENT_NOTE_ON,  7'd64, TEST_VELOCITY};
-                    5'd3:  entry = {16'd550,  `EVENT_NOTE_ON,  7'd65, TEST_VELOCITY};
-                    5'd4:  entry = {16'd700,  `EVENT_NOTE_ON,  7'd67, TEST_VELOCITY};
-                    5'd5:  entry = {16'd850,  `EVENT_NOTE_ON,  7'd69, TEST_VELOCITY};
-                    5'd6:  entry = {16'd1000, `EVENT_NOTE_ON,  7'd71, TEST_VELOCITY};
-                    5'd7:  entry = {16'd1150, `EVENT_NOTE_ON,  7'd72, TEST_VELOCITY};
-                    5'd8:  entry = {16'd1550, `EVENT_NOTE_OFF, 7'd60, 8'd0};
-                    5'd9:  entry = {16'd1700, `EVENT_NOTE_OFF, 7'd62, 8'd0};
-                    5'd10: entry = {16'd1850, `EVENT_NOTE_OFF, 7'd64, 8'd0};
-                    5'd11: entry = {16'd2000, `EVENT_NOTE_OFF, 7'd65, 8'd0};
-                    5'd12: entry = {16'd2150, `EVENT_NOTE_OFF, 7'd67, 8'd0};
-                    5'd13: entry = {16'd2300, `EVENT_NOTE_OFF, 7'd69, 8'd0};
-                    5'd14: entry = {16'd2450, `EVENT_NOTE_OFF, 7'd71, 8'd0};
-                    5'd15: entry = {16'd2600, `EVENT_NOTE_OFF, 7'd72, 8'd0};
-                    default: entry = {16'd2600, `EVENT_NOTE_OFF, 7'd72, 8'd0};
+                    5'd0:  entry = {16'd100,  EVENT_NOTE_ON,  7'd60, TEST_VELOCITY};
+                    5'd1:  entry = {16'd250,  EVENT_NOTE_ON,  7'd62, TEST_VELOCITY};
+                    5'd2:  entry = {16'd400,  EVENT_NOTE_ON,  7'd64, TEST_VELOCITY};
+                    5'd3:  entry = {16'd550,  EVENT_NOTE_ON,  7'd65, TEST_VELOCITY};
+                    5'd4:  entry = {16'd700,  EVENT_NOTE_ON,  7'd67, TEST_VELOCITY};
+                    5'd5:  entry = {16'd850,  EVENT_NOTE_ON,  7'd69, TEST_VELOCITY};
+                    5'd6:  entry = {16'd1000, EVENT_NOTE_ON,  7'd71, TEST_VELOCITY};
+                    5'd7:  entry = {16'd1150, EVENT_NOTE_ON,  7'd72, TEST_VELOCITY};
+                    5'd8:  entry = {16'd1550, EVENT_NOTE_OFF, 7'd60, 8'd0};
+                    5'd9:  entry = {16'd1700, EVENT_NOTE_OFF, 7'd62, 8'd0};
+                    5'd10: entry = {16'd1850, EVENT_NOTE_OFF, 7'd64, 8'd0};
+                    5'd11: entry = {16'd2000, EVENT_NOTE_OFF, 7'd65, 8'd0};
+                    5'd12: entry = {16'd2150, EVENT_NOTE_OFF, 7'd67, 8'd0};
+                    5'd13: entry = {16'd2300, EVENT_NOTE_OFF, 7'd69, 8'd0};
+                    5'd14: entry = {16'd2450, EVENT_NOTE_OFF, 7'd71, 8'd0};
+                    5'd15: entry = {16'd2600, EVENT_NOTE_OFF, 7'd72, 8'd0};
+                    default: entry = {16'd2600, EVENT_NOTE_OFF, 7'd72, 8'd0};
                 endcase
             end
 
@@ -147,13 +149,13 @@ module input_event_stub #(
             2'd2: begin
                 seq_len = 5'd6;
                 case (seq_idx)
-                    5'd0: entry = {16'd200,  `EVENT_NOTE_ON,  7'd69, 8'd200};
-                    5'd1: entry = {16'd400,  `EVENT_NOTE_OFF, 7'd69, 8'd0};
-                    5'd2: entry = {16'd700,  `EVENT_NOTE_ON,  7'd72, 8'd220};
-                    5'd3: entry = {16'd900,  `EVENT_NOTE_OFF, 7'd72, 8'd0};
-                    5'd4: entry = {16'd1200, `EVENT_NOTE_ON,  7'd65, 8'd160};
-                    5'd5: entry = {16'd1400, `EVENT_NOTE_OFF, 7'd65, 8'd0};
-                    default: entry = {16'd1400, `EVENT_NOTE_OFF, 7'd65, 8'd0};
+                    5'd0: entry = {16'd200,  EVENT_NOTE_ON,  7'd69, 8'd200};
+                    5'd1: entry = {16'd400,  EVENT_NOTE_OFF, 7'd69, 8'd0};
+                    5'd2: entry = {16'd700,  EVENT_NOTE_ON,  7'd72, 8'd220};
+                    5'd3: entry = {16'd900,  EVENT_NOTE_OFF, 7'd72, 8'd0};
+                    5'd4: entry = {16'd1200, EVENT_NOTE_ON,  7'd65, 8'd160};
+                    5'd5: entry = {16'd1400, EVENT_NOTE_OFF, 7'd65, 8'd0};
+                    default: entry = {16'd1400, EVENT_NOTE_OFF, 7'd65, 8'd0};
                 endcase
             end
 
@@ -165,17 +167,17 @@ module input_event_stub #(
             default: begin
                 seq_len = 5'd10;
                 case (seq_idx)
-                    5'd0: entry = {16'd100,  `EVENT_NOTE_ON, 7'd60, 8'd180};
-                    5'd1: entry = {16'd100,  `EVENT_NOTE_ON, 7'd64, 8'd200};
-                    5'd2: entry = {16'd100,  `EVENT_NOTE_ON, 7'd67, 8'd220};
-                    5'd3: entry = {16'd100,  `EVENT_NOTE_ON, 7'd72, 8'd240};
-                    5'd4: entry = {16'd600,  `EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
-                    5'd5: entry = {16'd900,  `EVENT_NOTE_ON, 7'd60, 8'd180};
-                    5'd6: entry = {16'd900,  `EVENT_NOTE_ON, 7'd64, 8'd200};
-                    5'd7: entry = {16'd900,  `EVENT_NOTE_ON, 7'd67, 8'd220};
-                    5'd8: entry = {16'd1200, `EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
-                    5'd9: entry = {16'd1500, `EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
-                    default: entry = {16'd1500, `EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
+                    5'd0: entry = {16'd100,  EVENT_NOTE_ON, 7'd60, 8'd180};
+                    5'd1: entry = {16'd100,  EVENT_NOTE_ON, 7'd64, 8'd200};
+                    5'd2: entry = {16'd100,  EVENT_NOTE_ON, 7'd67, 8'd220};
+                    5'd3: entry = {16'd100,  EVENT_NOTE_ON, 7'd72, 8'd240};
+                    5'd4: entry = {16'd600,  EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
+                    5'd5: entry = {16'd900,  EVENT_NOTE_ON, 7'd60, 8'd180};
+                    5'd6: entry = {16'd900,  EVENT_NOTE_ON, 7'd64, 8'd200};
+                    5'd7: entry = {16'd900,  EVENT_NOTE_ON, 7'd67, 8'd220};
+                    5'd8: entry = {16'd1200, EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
+                    5'd9: entry = {16'd1500, EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
+                    default: entry = {16'd1500, EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
                 endcase
             end
         endcase
@@ -201,7 +203,7 @@ module input_event_stub #(
             pattern_d  <= 2'd0;
             t_ms       <= 16'd0;
             valid_r    <= 1'b0;
-            type_r     <= `EVENT_NOP;
+            type_r     <= EVENT_NOP;
             note_r     <= 7'd0;
             vel_r      <= 8'd0;
         end else if (test_pattern != pattern_d) begin

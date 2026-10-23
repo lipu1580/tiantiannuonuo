@@ -22,8 +22,7 @@
 // 【expr_valid】
 //   电位器至少完成一次采样后置 1；表达式数据不是事件，可持续更新。
 //=============================================================================
-`include "project_params.svh"
-`include "audio_defs.svh"
+import audio_defs_pkg::WAVE_SINE;
 
 module expression_mapper #(
     parameter integer FILTER_SHIFT = 2,   // 滤波 alpha = 1/4
@@ -109,6 +108,6 @@ module expression_mapper #(
     assign pitch_bend   = bend_r;
     assign expr_valid   = ready_r;
     // 测试模式强制正弦；正常模式使用 K14 的按键状态
-    assign waveform_sel = test_mode ? `WAVE_SINE : waveform_key_sel;
+    assign waveform_sel = test_mode ? WAVE_SINE : waveform_key_sel;
 
 endmodule

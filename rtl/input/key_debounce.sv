@@ -23,12 +23,10 @@
 //   2. 长按不会重复产生 key_pressed，只有真实释放后再次按下才重新触发。
 //   3. key_pressed / key_released 均为 sys_clk 域单周期脉冲。
 //=============================================================================
-`include "project_params.svh"
-
 module key_debounce #(
-    parameter integer KEY_COUNT      = `KEY_COUNT,		//此处为16
-    parameter integer PRESS_CYCLES   = (`SYS_CLK_HZ / 1000) * `KEY_PRESS_MS,	//按下预设。表达的是2ms经过的周期数
-    parameter integer RELEASE_CYCLES = (`SYS_CLK_HZ / 1000) * `KEY_RELEASE_MS	//释放预设。这里是5ms。这两个数据将直接和后面的计数器进行比较
+    parameter integer KEY_COUNT      = project_params_pkg::KEY_COUNT,		//此处为16
+    parameter integer PRESS_CYCLES   = (project_params_pkg::SYS_CLK_HZ / 1000) * project_params_pkg::KEY_PRESS_MS,	//按下预设。表达的是2ms经过的周期数
+    parameter integer RELEASE_CYCLES = (project_params_pkg::SYS_CLK_HZ / 1000) * project_params_pkg::KEY_RELEASE_MS	//释放预设。这里是5ms。这两个数据将直接和后面的计数器进行比较
 )(
     input  logic                  sys_clk,
     input  logic                  rst_n,

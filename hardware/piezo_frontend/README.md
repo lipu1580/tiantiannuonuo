@@ -96,7 +96,7 @@ PIEZO_RETRIG_MS = 50
 2. 所有 GND 用 **GND 电源符号**，不要每个地都造一个端口。
 3. 网络名建议统一使用本文件的英文名，避免中文、空格和斜杠。
 4. `BAT54S` 的 Pin3 是公共端，接 `CLAMP0`；Pin1 接 GND；Pin2 接 3V3。
-5. `BZX84C3V3` 的 A（阳极）接 GND，K（阴极）接 `CLAMP0`，NC 悬空；物理 pin 号以封装/数据手册为准。
+5. `BZX84C3V3` 的 A（阳极）接 GND，K（阴极）接 `CLAMP0`，NC 悬空。按本数据手册（R+O BZX84C2V4~C75）：Pin1=A、Pin2=NC、Pin3=K。
 6. `2N7002` 的 Pin1=G、Pin2=S、Pin3=D；S 必须接 GND。
 7. `J3` 只输出 `ADC_CH2` 和电源；ADS7830 模块的 SCL/SDA 直接接 FPGA，不经过本板。
 8. 如果以后把 ADS7830 模块固定在本板上，再增加 SCL/SDA 排针和 4.7k 上拉。

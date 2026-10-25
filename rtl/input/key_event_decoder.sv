@@ -111,23 +111,24 @@ module key_event_decoder #(
     logic [KEY_COUNT-1:0] oct_down_mask;   // 哪些键是降八度
 
     genvar g;
-    generate
-        for (g = 0; g < KEY_COUNT; g++) begin : g_note_map	//g_note_map是这组生成块的名字
-            note_map #(
+    generate		//不是循环执行而是批量硬件生成
+        for (g = 0; g < KEY_COUNT; g++) begin : g_note_map	//g_note_map是这一整组生成块的名字
+							//展开后会有g_note_map[0], g_note_map[1]...
+            note_map #(		//模块，note_map是一个别处的模块
                 .NOTE_KEY_COUNT (NOTE_KEY_COUNT),
                 .BASE_NOTE      (BASE_NOTE)
-            ) u_note_map (
-                .key_index        (4'(g)),
+            ) u_note_map (	//这个是note_map的例化，将当前的g的note_map为模板例化，这个g是在g_note_map这一层被循环生成的
+                .key_index        (4'(g)),	//父模块输入子模块
                 .octave_offset    (octave_offset),
-                .is_note_key      (map_is_note[g]),
+                .is_note_key      (map_is_note[g]),	//子模块输出给父模块
                 .is_all_notes_off (map_all_off[g]),
                 .is_waveform_key  (map_wave[g]),
                 .is_octave_up     (map_oct_up[g]),
                 .is_octave_down   (map_oct_down[g]),
                 .note_id          (map_note[g])
             );
-
-            assign note_key_mask[g] = map_is_note[g];
+			//从这里开始，note_map的例化就结束了，每次例化结束，下面这些
+            assign note_key_mask[g] = map_is_note[g];	//父模块中的信号。从子模块的输出中拿到信息
             assign all_off_mask[g]  = map_all_off[g];
             assign wave_mask[g]     = map_wave[g];
             assign oct_up_mask[g]   = map_oct_up[g];
@@ -170,7 +171,7 @@ module key_event_decoder #(
     logic press_oct_up;
     logic press_oct_down;
 
-    assign press_all_off  = |(key_pressed & all_off_mask);
+    assign press_all_off  = |(key_pressed & all_off_mask);//按的就是这个键&这个键的掩码=有一个1=塌缩为1
     assign press_wave     = |(key_pressed & wave_mask);
     assign press_oct_up   = |(key_pressed & oct_up_mask);
     assign press_oct_down = |(key_pressed & oct_down_mask);

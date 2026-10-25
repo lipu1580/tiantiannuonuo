@@ -64,7 +64,7 @@ module key_event_decoder #(
     input  logic                    rst_n,
 
     // 按键边沿（单周期脉冲）与稳定状态
-    input  logic [KEY_COUNT-1:0]    key_pressed,		//16位宽，是从上一个模块出来的确定按下信号
+    input  logic [KEY_COUNT-1:0]    key_pressed,		//16位宽，是从上一个消抖模块出来的确定按下信号
     input  logic [KEY_COUNT-1:0]    key_released,
     input  logic [KEY_COUNT-1:0]    key_down,
     // 当前 FSR 力度，NOTE_ON 时锁存

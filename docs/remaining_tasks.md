@@ -3,7 +3,7 @@
 > 逐项的现状、目标、缺失内容、验收标准和测试方案见
 > `docs/仍未完成的功能详情.md`。本文件只保留快速清单。
 
-盘点日期：2026-10-20  
+盘点日期：2026-10-27（上次盘点 2026-10-20）  
 依据：成员 2 任务书 V1.0、`docs/device_Info_path.md`、`docs/hardware_list.md`、当前 RTL/仿真。
 
 ---
@@ -23,6 +23,11 @@
 - **9 个 testbench 全部通过**
 
 剩余工作的重点已经从“RTL 功能”转移到“P1 可靠性 + 板级联调”。
+
+> **2026-10-27 复核**：`make lint` = 0 警告，`make sim` = 9/9 `TEST PASSED`，
+> P0 全部完成且未回退。本次新增三项代码级隐患 **F-16 / F-17 / F-18**
+> （详见 `docs/仍未完成的功能详情.md` 第 3 章末尾）：
+> 同键 pending 槽位覆盖、背压期间事件字段漂移、I²C 速率 422 kHz 超规格。
 
 ---
 
@@ -66,6 +71,12 @@
 - [ ] `fsr_filter` 增加零点/满量程校准参数（当前只有固定 `NOISE_GATE`）
 - [ ] `event_queue` 的 `overflow` 提供系统级清除方式（当前 `overflow_clear` 接 0）
 - [ ] 明确矩阵鬼键支持范围；若要 16 键全键无冲，增加 16 只 1N4148
+- [ ] **F-16** `key_event_decoder` 每键仅一个 pending 槽位，`NOTE_OFF` 会覆盖未发出的
+      `NOTE_ON`，快速按放时丢音
+- [ ] **F-17** `key_event_decoder` 的 `event_req_*` 是组合输出，背压期间同键新事件会
+      改写字段，违反 valid/ready 协议
+- [ ] **F-18** `ADC_I2C_HZ=400k` 实际算出 SCL≈422 kHz，超出 ADS7830 的 400 kHz 上限，
+      建议改为 300 kHz
 
 ### 2.2 仿真覆盖
 
@@ -117,7 +128,10 @@ P0 的 RTL 已全部完成，剩下的是 P1 可靠性与板级联调：
 
 1. **优先做**：`adc_ads7830` 总线超时/恢复（F-07）。这是目前唯一会让
    整个输入模块永久卡死的隐患：SDA 一被拉死，状态机可能停在等待 ACK。
-2. 补 `adc_ads7830` 的 NACK 仿真路径。
-3. `expression_mapper` 中心死区 + `fsr_filter` 零点校准（F-06/F-08）。
-4. 补独立 TB：`tb_note_map`、`tb_expression_mapper`、`tb_key_event_decoder`。
-5. 与成员 1/3 做顶层联调，测端到端延迟。
+2. **次优**：`key_event_decoder` 同键 pending 槽位覆盖（F-16）—— 会直接丢音。
+3. `expression_mapper` 中心死区（F-06）+ 背压字段锁存（F-17）。
+4. `ADC_I2C_HZ` 改 300 kHz（F-18）—— 上板前必改。
+5. 补 `adc_ads7830` 的 NACK/超时仿真路径，以及 `overflow_clear`（F-09）。
+6. 补独立 TB：`tb_note_map`、`tb_expression_mapper`、`tb_key_event_decoder`。
+7. `fsr_filter` 零点校准（F-08）。
+8. 与成员 1/3 做顶层联调，测端到端延迟。

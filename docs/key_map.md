@@ -49,10 +49,10 @@ row3  K12     K12      K13      K14      K15
 
 ---
 
-## 2.1 模式 1：矩阵选根音 + 压电触发（`MATRIX_MODE=1`）
+## 2.1 模式 1：矩阵选根音 + FSR 触发（`MATRIX_MODE=1`）
 
 正式演奏模式。**K0~K11 不再发言符事件**，只更新根音 `base_note`；
-发声由 5 片压电片完成。
+发声由 5 片 FSR402 完成（一端接 3.3 V，另一端接 ADC，每路 1 个 10 kΩ 到 GND）。
 
 | 键号 | 功能 |
 |---|---|
@@ -62,9 +62,9 @@ row3  K12     K12      K13      K14      K15
 | K14 | 波形切换 0→1→2→3→0 |
 | K15 | 八度 -1（范围 -2 ~ +2） |
 
-压电片映射（大调五声音阶）：
+FSR 触发映射（大调五声音阶）：
 
-| 压电片 | ADC 通道 | 偏移 | 根音 C4 时 |
+| FSR | ADC 通道 | 偏移 | 根音 C4 时 |
 |---|---|---|---|
 | P0 | CH2 | +0 | 60 (C4) |
 | P1 | CH3 | +2 | 62 (D4) |
@@ -73,7 +73,7 @@ row3  K12     K12      K13      K14      K15
 | P4 | CH6 | +9 | 69 (A4) |
 
 ```text
-note_id = clamp(base_note + PIEZO_OFFSET[i], 0, 127)
+note_id = clamp(base_note + TRIG_OFFSET[i], 0, 127)
 base_note = clamp(60 + root_pitch_class + 12 * octave_offset, 0, 127)
 ```
 

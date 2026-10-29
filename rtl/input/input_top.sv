@@ -1,21 +1,22 @@
 //=============================================================================
 // 文件   : input_top.sv
 // 归属   : 成员 2（交互输入与演奏事件模块）唯一公开顶层
-// 功能   : 4x4 按键矩阵 + 5 路压电 + FSR 力度 + 电位器表情
+// 功能   : 4x4 按键矩阵 + 5 路 FSR 触发 + FSR 力度 + 电位器表情
 //          -> 标准演奏事件 + 表情接口。
 //
 // 【这个模块在系统中的位置】
 //
 //   4x4 矩阵 ──► key_scan ──► key_debounce ──► key_event_decoder ──┐
 //                                                                  │
-//   5 路压电 ──► 保护/峰值保持 ──► ADS7830 CH2~CH6 ──► piezo_peak ──┼─► event_queue ──► event_* ──► audio_core（成员 1）
+//   5 路 FSR ──► ADS7830 CH2~CH6 ──► fsr_trigger ───────────────────┼─► event_queue ──► event_* ──► audio_core（成员 1）
+//   （FSR 一端接 3.3V，另一端直接进 ADC，实测无需前端电路）          │
 //                                                                  │
 //   ADS7830 ──► 7 通道采样调度 ──► fsr_filter ──► expression ───────┘
 //                            └──► expression_mapper ──► pitch_bend / waveform_sel
 //
 // 【建议阅读顺序】
 //   key_scan.sv -> key_debounce.sv -> note_map.sv -> key_event_decoder.sv
-//   -> piezo_peak.sv -> event_queue.sv -> adc_ads7830.sv -> fsr_filter.sv
+//   -> fsr_trigger.sv -> event_queue.sv -> adc_ads7830.sv -> fsr_filter.sv
 //   -> expression_mapper.sv -> input_event_stub.sv -> 本文件（看拼装）
 //
 // 【一句话理解】
@@ -34,12 +35,12 @@
 //   2. ADS7830 是 I2C 器件，物理接口为 adc_scl/adc_sda_oe/adc_sda_i；
 //      板级顶层用三态缓冲把 oe 转换成双向 SDA。
 //   3. ADC 通道分配（通过参数可改）：
-//      CH0=FSR、CH1=电位器、CH2~CH6=5 路压电(P0~P4)、CH7=备用。
-//      调度顺序 CH2..CH6 -> CH0 -> CH1，压电优先以降低触发延迟。
+//      CH0=FSR 表情、CH1=电位器、CH2~CH6=5 路 FSR 触发(P0~P4)、CH7=备用。
+//      调度顺序 CH2..CH6 -> CH0 -> CH1，触发通道优先以降低延迟。
 //   4. test_mode=1 时事件源切换为 input_event_stub，真实按键事件被排空丢弃；
 //      表情仍来自实际 ADC，waveform_sel 强制为正弦波。
 //   5. 成员 1 的 audio_core 内部也有测试音源，两套 test_mode 不要同时打开。
-//   6. 事件优先级：ALL_NOTES_OFF > 压电触发 > 矩阵按键。
+//   6. 事件优先级：ALL_NOTES_OFF > FSR 触发 > 矩阵按键。
 //=============================================================================
 import audio_defs_pkg::EVENT_ALL_NOTES_OFF;
 import audio_defs_pkg::DEFAULT_VELOCITY;
@@ -71,7 +72,7 @@ module input_top #(
     //       实际 SCL ≈ 27e6 / (16 * 4) = 421.9 kHz
     //   SAMPLE_INTERVAL：一次转换完成后再等待多少拍才发起下一次请求
     //       27e6 / (1e6 / 20) = 540 拍 = 20 us（ADC_SAMPLE_INTERVAL_US=20）
-    //   7 通道轮询：CH2 CH3 CH4 CH5 CH6(压电) -> CH0(FSR) -> CH1(POT) -> 循环
+    //   7 通道轮询：CH2 CH3 CH4 CH5 CH6(FSR 触发) -> CH0(FSR 表情) -> CH1(POT) -> 循环
     //       单次 I2C 事务（地址+命令+读）约 100 us，加 20 us 间隔
     //       一轮 7 通道约 0.84 ms
     //-------------------------------------------------------------------------
@@ -94,13 +95,16 @@ module input_top #(
     parameter integer MATRIX_MODE      = 0,
 
     //-------------------------------------------------------------------------
-    // 5 路压电输入
+    // 5 路 FSR 触发输入
     //   参数名不能和 package 参数同名，否则会在模块内遮蔽。
     //-------------------------------------------------------------------------
-    parameter logic [2:0] PIEZO_BASE_CH = project_params_pkg::PIEZO_ADC_CHANNEL_BASE, // P0 所在 ADC 通道
-    parameter logic [7:0] PIEZO_THRESH  = project_params_pkg::PIEZO_THRESHOLD,        // 全局触发阈值
-    parameter integer PIEZO_OFF_MS     = project_params_pkg::PIEZO_NOTE_OFF_MS,      // 自动 NOTE_OFF 时间
-    parameter integer PIEZO_RETRIG_MS  = project_params_pkg::PIEZO_RETRIGGER_MS      // 防重复触发窗口
+    parameter logic [2:0] TRIG_BASE_CH   = project_params_pkg::TRIGGER_ADC_CHANNEL_BASE, // P0 所在 ADC 通道
+    parameter logic [7:0] TRIG_THRESH    = project_params_pkg::TRIGGER_THRESHOLD,        // 触发阈值
+    parameter integer     TRIG_HYST      = project_params_pkg::TRIGGER_RELEASE_HYST,     // 释放回差
+    parameter integer     TRIG_REL_SAMP  = project_params_pkg::TRIGGER_RELEASE_SAMPLES,  // 释放确认样本数
+    parameter integer     TRIG_OFF_MS    = project_params_pkg::TRIGGER_NOTE_OFF_MS,      // 兜底 NOTE_OFF 时间
+    parameter integer     TRIG_RETRIG_MS = project_params_pkg::TRIGGER_RETRIGGER_MS,     // 防重复触发窗口
+    parameter logic [7:0] TRIG_VEL_FULL  = project_params_pkg::TRIGGER_VEL_FULL_SCALE    // 力度满量程 ADC 值
 )(
     //-------------------------------------------------------------------------
     // 时钟与复位（整颗模块单时钟域）
@@ -166,9 +170,9 @@ module input_top #(
     //-------------------------------------------------------------------------
     // 压电输入调试/控制
     //-------------------------------------------------------------------------
-    output logic [4:0]  piezo_peak_rst,      // 5 路峰值电容放电（接 2N7002 栅极）
-    output logic [4:0]  piezo_hit_debug,     // 5 路峰值是否超过阈值
-    output logic [4:0]  piezo_active_debug,  // 5 路是否正在发声
+    output logic [4:0]  piezo_peak_rst,      // 旧压电峰值放电：新方案无此硬件，恒为 0（保留端口兼容板级约束）
+    output logic [4:0]  piezo_hit_debug,     // 5 路 FSR 电平是否超过阈值
+    output logic [4:0]  piezo_active_debug,  // 5 路 FSR 是否正在发声
     output logic [6:0]  base_note_debug      // 当前根音（含八度）
 );
 
@@ -213,7 +217,7 @@ module input_top #(
     // ADC 采样调度：7 通道轮询
     //
     //   顺序：CH2 CH3 CH4 CH5 CH6 CH0 CH1
-    //   先采 5 路压电，保证触发延迟最低；FSR/电位器变化慢，放在后面。
+    //   先采 5 路 FSR 触发，保证触发延迟最低；表情 FSR/电位器变化慢，放在后面。
     //   一轮 7 通道约 (100 us + SAMPLE_INTERVAL) * 7，
     //   默认 SAMPLE_INTERVAL=20 us -> 一轮约 0.84 ms。
     //
@@ -244,14 +248,14 @@ module input_top #(
     logic [2:0]        sample_channel;  // 样点对应通道
     logic              adc_bus_error_r; // I2C 错误
 
-    // 通道顺序：压电优先，FSR/电位器最后
+    // 通道顺序：FSR 触发优先，表情 FSR/电位器最后
     always_comb begin
         case (scan_idx)
-            3'd0:    adc_ch_sel = PIEZO_BASE_CH;
-            3'd1:    adc_ch_sel = PIEZO_BASE_CH + 3'd1;
-            3'd2:    adc_ch_sel = PIEZO_BASE_CH + 3'd2;
-            3'd3:    adc_ch_sel = PIEZO_BASE_CH + 3'd3;
-            3'd4:    adc_ch_sel = PIEZO_BASE_CH + 3'd4;
+            3'd0:    adc_ch_sel = TRIG_BASE_CH;
+            3'd1:    adc_ch_sel = TRIG_BASE_CH + 3'd1;
+            3'd2:    adc_ch_sel = TRIG_BASE_CH + 3'd2;
+            3'd3:    adc_ch_sel = TRIG_BASE_CH + 3'd3;
+            3'd4:    adc_ch_sel = TRIG_BASE_CH + 3'd4;
             3'd5:    adc_ch_sel = FSR_CHANNEL;
             default: adc_ch_sel = POT_CHANNEL;
         endcase
@@ -368,15 +372,15 @@ module input_top #(
     assign expression = fsr_filtered;
 
     //-------------------------------------------------------------------------
-    // 按键/压电事件 -> 仲裁 -> FIFO
+    // 按键/FSR 触发事件 -> 仲裁 -> FIFO
     //
     //   两路事件源：
     //     matrix_req_*：矩阵译码器（NOTE_ON/OFF/ALL_NOTES_OFF）
-    //     piezo_req_* ：5 路压电触发（NOTE_ON / 自动 NOTE_OFF）
+    //     trig_req_*  ：5 路 FSR 触发（NOTE_ON / 电平释放 NOTE_OFF）
     //
     //   仲裁优先级：
     //     1. ALL_NOTES_OFF（矩阵）—— 最高，先清掉所有声部
-    //     2. 压电事件 —— 触发是瞬态的，优先于普通矩阵事件
+    //     2. FSR 触发事件 —— 优先于普通矩阵事件
     //     3. 矩阵普通事件
     //
     //   未被选中的源会把事件保持在各自的 pending 表中，直到 ready。
@@ -387,14 +391,14 @@ module input_top #(
     logic [6:0]  matrix_req_note;
     logic [7:0]  matrix_req_vel;
 
-    logic        piezo_req_valid;
-    logic        piezo_req_ready;
-    logic [1:0]  piezo_req_type;
-    logic [6:0]  piezo_req_note;
-    logic [7:0]  piezo_req_vel;
+    logic        trig_req_valid;
+    logic        trig_req_ready;
+    logic [1:0]  trig_req_type;
+    logic [6:0]  trig_req_note;
+    logic [7:0]  trig_req_vel;
 
     logic [6:0]  base_note;       // 当前根音（含八度）
-    logic        piezo_all_off;   // ALL_NOTES_OFF 被接收时清压电状态
+    logic        trig_all_off;    // ALL_NOTES_OFF 被接收时清触发状态
 
     logic        queue_wr_valid;
     logic        queue_wr_ready;
@@ -437,68 +441,73 @@ module input_top #(
     );
 
     //-------------------------------------------------------------------------
-    // 5 路压电触发
-    //   ADC 样本 -> 峰值/阈值 -> NOTE_ON + velocity
-    //                        -> 定时 NOTE_OFF
-    //                        -> peak_rst 给硬件峰值电容放电
+    // 5 路 FSR 触发
+    //   ADC 样本 -> 阈值/迟滞 -> NOTE_ON + velocity
+    //                        -> 电平释放判定 -> NOTE_OFF
+    //   无峰值保持、无放电 MOSFET，硬件只需 FSR 直接接 ADC 通道。
     //-------------------------------------------------------------------------
-    piezo_peak #(
+    fsr_trigger #(
         .SYS_CLK_HZ      (SYS_CLK_HZ),
-        .THRESHOLD       (PIEZO_THRESH),
-        .NOTE_OFF_MS     (PIEZO_OFF_MS),
-        .RETRIGGER_MS    (PIEZO_RETRIG_MS),
-        .PEAK_RST_CYCLES (project_params_pkg::PIEZO_PEAK_RST_CYCLES)
-    ) u_piezo (
+        .THRESHOLD       (TRIG_THRESH),
+        .RELEASE_HYST    (TRIG_HYST),
+        .RELEASE_SAMPLES (TRIG_REL_SAMP),
+        .RETRIGGER_MS    (TRIG_RETRIG_MS),
+        .NOTE_OFF_MS     (TRIG_OFF_MS),
+        .VEL_FULL_SCALE  (TRIG_VEL_FULL)
+    ) u_trig (
         .sys_clk            (sys_clk),
         .rst_n              (rst_n),
         .sample_valid       (sample_valid),
         .sample_channel     (sample_channel),
         .sample_data        (sample_data),
-        .piezo_ch_base      (PIEZO_BASE_CH),
+        .trig_ch_base       (TRIG_BASE_CH),
         .base_note          (base_note),
-        .all_off            (piezo_all_off),
-        .peak_rst           (piezo_peak_rst),
-        .event_req_valid    (piezo_req_valid),
-        .event_req_ready    (piezo_req_ready),
-        .event_req_type     (piezo_req_type),
-        .event_req_note     (piezo_req_note),
-        .event_req_velocity (piezo_req_vel),
+        .all_off            (trig_all_off),
+        .event_req_valid    (trig_req_valid),
+        .event_req_ready    (trig_req_ready),
+        .event_req_type     (trig_req_type),
+        .event_req_note     (trig_req_note),
+        .event_req_velocity (trig_req_vel),
         .hit_debug          (piezo_hit_debug),
-        .active_debug       (piezo_active_debug)
+        .active_debug       (piezo_active_debug),
+        .level_debug        ()
     );
 
+    // 旧压电方案的峰值电容放电已不存在，端口固化输出 0（兼容板级约束）
+    assign piezo_peak_rst = 5'd0;
+
     //-------------------------------------------------------------------------
-    // 事件仲裁：ALL_OFF > 压电 > 矩阵普通事件
+    // 事件仲裁：ALL_OFF > FSR 触发 > 矩阵普通事件
     //-------------------------------------------------------------------------
     logic matrix_sel;
-    logic piezo_sel;
+    logic trig_sel;
 
     always_comb begin
         matrix_sel = 1'b0;
-        piezo_sel  = 1'b0;
+        trig_sel   = 1'b0;
 
         if (matrix_req_valid && (matrix_req_type == EVENT_ALL_NOTES_OFF)) begin
             matrix_sel = 1'b1;
-        end else if (piezo_req_valid) begin
-            piezo_sel = 1'b1;
+        end else if (trig_req_valid) begin
+            trig_sel = 1'b1;
         end else if (matrix_req_valid) begin
             matrix_sel = 1'b1;
         end
     end
 
-    assign queue_wr_valid = matrix_sel | piezo_sel;
-    assign queue_wr_type  = matrix_sel ? matrix_req_type : piezo_req_type;
-    assign queue_wr_note  = matrix_sel ? matrix_req_note : piezo_req_note;
-    assign queue_wr_vel   = matrix_sel ? matrix_req_vel  : piezo_req_vel;
+    assign queue_wr_valid = matrix_sel | trig_sel;
+    assign queue_wr_type  = matrix_sel ? matrix_req_type : trig_req_type;
+    assign queue_wr_note  = matrix_sel ? matrix_req_note : trig_req_note;
+    assign queue_wr_vel   = matrix_sel ? matrix_req_vel  : trig_req_vel;
 
     // 只有被选中的源才会看到 ready；另一个源继续持有事件
     assign matrix_req_ready = queue_wr_ready && matrix_sel;
-    assign piezo_req_ready  = queue_wr_ready && piezo_sel;
+    assign trig_req_ready   = queue_wr_ready && trig_sel;
 
-    // ALL_OFF 被 FIFO 接收的同拍，通知 piezo_peak 清活跃状态/待发事件
-    assign piezo_all_off = matrix_req_valid &&
-                           (matrix_req_type == EVENT_ALL_NOTES_OFF) &&
-                           matrix_req_ready;
+    // ALL_OFF 被 FIFO 接收的同拍，通知 fsr_trigger 清活跃状态/待发事件
+    assign trig_all_off = matrix_req_valid &&
+                          (matrix_req_type == EVENT_ALL_NOTES_OFF) &&
+                          matrix_req_ready;
 
     //-------------------------------------------------------------------------
     // 事件 FIFO
@@ -574,7 +583,7 @@ module input_top #(
     //   input_state[2] = pressure_valid
     //   input_state[1] = adc_busy
     //   input_state[0] = event_valid
-    //   piezo_*_debug 单独给出，便于观察 5 路压电状态。
+    //   piezo_*_debug 单独给出，便于观察 5 路 FSR 触发状态。
     //-------------------------------------------------------------------------
     assign adc_busy       = sample_busy;
     assign adc_valid      = sample_valid;

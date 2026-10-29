@@ -100,8 +100,9 @@ module tb_input_top;
         .FSR_CHANNEL      (3'd0),
         .POT_CHANNEL      (3'd1),
         .EVENT_FIFO_DEPTH (8),
-        .PIEZO_OFF_MS     (100),
-        .PIEZO_RETRIG_MS  (20)
+        .TRIG_OFF_MS      (100),
+        .TRIG_RETRIG_MS   (20),
+        .TRIG_REL_SAMP    (3)
     ) dut (
         .sys_clk        (clk),
         .rst_n          (rst_n),
@@ -217,7 +218,7 @@ module tb_input_top;
         pressed = '0;
         u_model.adc_val[0] = 8'h40;   // FSR   = 64
         u_model.adc_val[1] = 8'hC0;   // POT   = 192 -> pitch_bend = 3072
-        u_model.adc_val[2] = 8'h00;   // 5 路压电峰值先置 0，避免 X 传播
+        u_model.adc_val[2] = 8'h00;   // 5 路 FSR 触发电平先置 0，避免 X 传播
         u_model.adc_val[3] = 8'h00;
         u_model.adc_val[4] = 8'h00;
         u_model.adc_val[5] = 8'h00;
@@ -244,7 +245,7 @@ module tb_input_top;
 
         //---------------------------------------------------------------------
         // 2) 等 ADC/FSR 稳定
-        //    现在 7 通道轮询：CH2~CH6 压电、CH0 FSR、CH1 POT；
+        //    现在 7 通道轮询：CH2~CH6 FSR 触发、CH0 FSR 表情、CH1 POT；
         //    一轮约 (400 + 转换时间) * 7，留足 12000 拍。
         //---------------------------------------------------------------------
         repeat (12000) @(posedge clk);
@@ -454,20 +455,20 @@ module tb_input_top;
         end
 
         //---------------------------------------------------------------------
-        // 9) 压电集成：P0(CH2) 峰值 -> NOTE_ON -> 自动 NOTE_OFF
+        // 9) FSR 触发集成：P0(CH2) 电平 -> NOTE_ON -> 松手 NOTE_OFF
         //---------------------------------------------------------------------
         base = ev_count;
-        u_model.adc_val[2] = 8'd150;   // P0 峰值，超过阈值 20
+        u_model.adc_val[2] = 8'd150;   // P0 电平，超过阈值 20
 
-        wait_events(base + 1, 20000, "piezo P0 NOTE_ON");
-        check_event(base, 2'b01, 7'd60, "piezo P0 NOTE_ON C4");
-        check_velocity(base, 100, 160, "piezo P0 velocity");
+        wait_events(base + 1, 20000, "trig P0 NOTE_ON");
+        check_event(base, 2'b01, 7'd60, "trig P0 NOTE_ON C4");
+        check_velocity(base, 170, 200, "trig P0 velocity");
 
-        // 峰值模型是“常值”，触发后清零，防止下一轮扫描重复触发
+        // 松手：连续 3 个样本低于释放阈值才会产生 NOTE_OFF
         u_model.adc_val[2] = 8'd0;
 
-        wait_events(base + 2, 20000, "piezo P0 auto NOTE_OFF");
-        check_event(base + 1, 2'b10, 7'd60, "piezo P0 auto NOTE_OFF");
+        wait_events(base + 2, 60000, "trig P0 NOTE_OFF");
+        check_event(base + 1, 2'b10, 7'd60, "trig P0 NOTE_OFF C4");
 
         //---------------------------------------------------------------------
         // 10) 最终检查

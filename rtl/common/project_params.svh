@@ -50,7 +50,22 @@ package project_params_pkg;
     parameter logic [2:0] POT_ADC_CHANNEL = 3'd1; // ADS7830 CH1 接电位器
 
     //----------------------------------------------------------------------
-    // 5 路压电输入（CH2~CH6，CH7 备用）
+    // 5 路 FSR 触发输入（CH2~CH6，CH7 备用）
+    //   新方案：FSR 一端接 3.3V、另一端直接接 ADS7830 通道，
+    //   实测无需额外前端电路。RTL 只做阈值 / 迟滞 / 释放判定。
+    //----------------------------------------------------------------------
+    parameter integer TRIGGER_COUNT = 5;                          // 触发通道数
+    parameter logic [2:0] TRIGGER_ADC_CHANNEL_BASE = 3'd2;        // P0 从 CH2 开始
+    parameter logic [7:0] TRIGGER_THRESHOLD = 8'd20;              // 触发阈值（ADC 码）
+    parameter integer TRIGGER_RELEASE_HYST = 4;                   // 释放回差
+    parameter integer TRIGGER_RELEASE_SAMPLES = 3;                // 连续低于阈值几次判定松开
+    parameter integer TRIGGER_RETRIGGER_MS = 20;                  // 两次触发最小间隔
+    parameter integer TRIGGER_NOTE_OFF_MS = 2000;                 // 无样本时的兜底 NOTE_OFF
+    parameter logic [7:0] TRIGGER_VEL_FULL_SCALE = 8'd200;        // 实测重击 ADC 值（力度满量程）
+
+    //----------------------------------------------------------------------
+    // 旧压电峰值方案（已由 FSR 触发替代）
+    //   仅保留 piezo_peak.sv 的参数依赖，新代码请勿使用。
     //----------------------------------------------------------------------
     parameter integer PIEZO_COUNT = 5;
     parameter logic [2:0] PIEZO_ADC_CHANNEL_BASE = 3'd2; // P0 从 CH2 开始

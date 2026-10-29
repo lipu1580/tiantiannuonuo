@@ -28,7 +28,7 @@ module tang_nano20k_top (
     output logic        adc_scl,
     inout  wire         adc_sda,
 
-    // 5 路压电峰值电容放电（接 2N7002 栅极）
+    // 旧压电方案遗留端口：当前恒为 0，可不连接
     output logic [4:0]  piezo_peak_rst,
 
     // 成员 2 测试事件源选择（input_event_stub）
@@ -83,7 +83,7 @@ module tang_nano20k_top (
 
     input_top #(
         .SYS_CLK_HZ (SYS_CLK_HZ),
-        .MATRIX_MODE (1)          // 1=矩阵选根音/音区，5 路压电触发
+        .MATRIX_MODE (1)          // 1=矩阵选根音/音区，5 路 FSR 触发
     ) u_input_top (
         .sys_clk        (sys_clk),
         .rst_n          (rst_n),

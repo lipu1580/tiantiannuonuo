@@ -6,7 +6,7 @@ RTL_DIR := rtl/audio
 TB_DIR := sim
 
 #目标与tb文件
-WAIT_TB_NAME := voice
+WAIT_TB_NAME := pcm_stream_adapter
 TB_NAME := tb_$(WAIT_TB_NAME)
 suffix := .sv
 RTL_FILE = $(wildcard rtl/audio/*.sv)

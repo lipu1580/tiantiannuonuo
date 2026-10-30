@@ -6,7 +6,7 @@ RTL_DIR := rtl/audio
 TB_DIR := sim
 
 #目标与tb文件
-WAIT_TB_NAME := event_router
+WAIT_TB_NAME := audio_test_source
 TB_NAME := tb_$(WAIT_TB_NAME)
 suffix := .sv
 RTL_FILE = $(wildcard rtl/audio/*.sv)

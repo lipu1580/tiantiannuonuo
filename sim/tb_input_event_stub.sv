@@ -1,6 +1,12 @@
 //=============================================================================
 // 文件   : tb_input_event_stub.sv
-// 功能   : 固定演示事件源测试：序列顺序、握手背压、pattern 切换。
+// 功能   : 固定演示事件源测试。
+//   覆盖：
+//     1. pattern 0 的 9 个事件顺序/字段
+//     2. 背压期间事件字段保持（不撤销、不改写）
+//     3. 背压期间切换 test_pattern：未接收事件必须保留（评审清单第 6 项），
+//        之后先补 ALL_NOTES_OFF 再按新序列运行
+//     4. restart 输入（input_top 在切换事件源时使用）
 //=============================================================================
 `timescale 1ns/1ps
 
@@ -9,6 +15,7 @@ module tb_input_event_stub;
     logic       clk = 1'b0;
     logic       rst_n = 1'b0;
     logic [1:0] test_pattern = 2'd0;
+    logic       restart = 1'b0;
 
     logic       event_valid;
     logic       event_ready = 1'b0;
@@ -17,12 +24,11 @@ module tb_input_event_stub;
     logic [7:0] event_velocity;
 
     int errors = 0;
-    int ev_idx = 0;
+    int ev_count = 0;
 
-    // 期望序列（pattern 0）
-    logic [1:0] exp_type [0:8];
-    logic [6:0] exp_note [0:8];
-    logic [7:0] exp_vel  [0:8];
+    logic [1:0] log_type [0:255];
+    logic [6:0] log_note [0:255];
+    logic [7:0] log_vel  [0:255];
 
     always #5 clk = ~clk;
 
@@ -32,6 +38,7 @@ module tb_input_event_stub;
         .sys_clk       (clk),
         .rst_n         (rst_n),
         .test_pattern  (test_pattern),
+        .restart       (restart),
         .event_valid   (event_valid),
         .event_ready   (event_ready),
         .event_type    (event_type),
@@ -44,57 +51,79 @@ module tb_input_event_stub;
     //-------------------------------------------------------------------------
     always @(posedge clk) begin
         if (rst_n && event_valid && event_ready) begin
+            log_type[ev_count] = event_type;
+            log_note[ev_count] = event_note_id;
+            log_vel[ev_count]  = event_velocity;
             $display("[%0t] EVENT #%0d type=%0d note=%0d vel=%0d",
-                     $time, ev_idx, event_type, event_note_id, event_velocity);
-            if (ev_idx < 9) begin
-                if (event_type !== exp_type[ev_idx] ||
-                    event_note_id !== exp_note[ev_idx] ||
-                    event_velocity !== exp_vel[ev_idx]) begin
-                    $display("FAIL: event #%0d mismatch: got (%0d,%0d,%0d), exp (%0d,%0d,%0d)",
-                             ev_idx, event_type, event_note_id, event_velocity,
-                             exp_type[ev_idx], exp_note[ev_idx], exp_vel[ev_idx]);
-                    errors++;
-                end
-            end
-            ev_idx++;
+                     $time, ev_count, event_type, event_note_id, event_velocity);
+            ev_count++;
         end
     end
 
+    //-------------------------------------------------------------------------
+    // 辅助任务
+    //-------------------------------------------------------------------------
+    task automatic wait_events(input int target, input int timeout,
+                               input string msg);
+        int guard;
+        guard = 0;
+        while (ev_count < target && guard < timeout) begin
+            @(posedge clk);
+            guard++;
+        end
+        if (ev_count < target) begin
+            $display("FAIL [%s]: only %0d events, expected %0d",
+                     msg, ev_count, target);
+            errors++;
+        end
+    endtask
+
+    task automatic wait_valid(input int timeout, input string msg);
+        int guard;
+        guard = 0;
+        while (!event_valid && guard < timeout) begin
+            @(posedge clk);
+            guard++;
+        end
+        if (!event_valid) begin
+            $display("FAIL [%s]: event_valid never asserted", msg);
+            errors++;
+        end
+    endtask
+
+    task automatic check_event(input int idx, input logic [1:0] t,
+                               input logic [6:0] n, input logic [7:0] v,
+                               input string msg);
+        if (log_type[idx] !== t || log_note[idx] !== n || log_vel[idx] !== v) begin
+            $display("FAIL [%s]: event%0d = (%0d,%0d,%0d), expected (%0d,%0d,%0d)",
+                     msg, idx, log_type[idx], log_note[idx], log_vel[idx],
+                     t, n, v);
+            errors++;
+        end else begin
+            $display("PASS [%s]: event%0d = (%0d,%0d,%0d)", msg, idx, t, n, v);
+        end
+    endtask
+
     initial begin
-        // pattern 0 期望值
-        exp_type[0] = 2'b01; exp_note[0] = 7'd60; exp_vel[0] = 8'd180;
-        exp_type[1] = 2'b01; exp_note[1] = 7'd64; exp_vel[1] = 8'd180;
-        exp_type[2] = 2'b01; exp_note[2] = 7'd67; exp_vel[2] = 8'd180;
-        exp_type[3] = 2'b01; exp_note[3] = 7'd72; exp_vel[3] = 8'd180;
-        exp_type[4] = 2'b10; exp_note[4] = 7'd60; exp_vel[4] = 8'd0;
-        exp_type[5] = 2'b10; exp_note[5] = 7'd64; exp_vel[5] = 8'd0;
-        exp_type[6] = 2'b10; exp_note[6] = 7'd67; exp_vel[6] = 8'd0;
-        exp_type[7] = 2'b10; exp_note[7] = 7'd72; exp_vel[7] = 8'd0;
-        exp_type[8] = 2'b11; exp_note[8] = 7'd0;  exp_vel[8] = 8'd0;
+        logic [1:0] held_type;
+        logic [6:0] held_note;
+        logic [7:0] held_vel;
 
         repeat (5) @(posedge clk);
         rst_n = 1'b1;
+        repeat (5) @(posedge clk);
 
         //---------------------------------------------------------------------
-        // 等待第一个事件，并检验背压期间字段稳定
+        // 1) 第一个事件在背压下必须保持稳定
         //---------------------------------------------------------------------
-        begin : wait_first
-            int guard;
-            guard = 0;
-            while (!event_valid && guard < 5000) begin
-                @(posedge clk);
-                guard++;
-            end
-            if (!event_valid) begin
-                $display("FAIL: timeout waiting first event");
-                errors++;
-            end
-        end
-
+        wait_valid(5000, "first event");
         if (event_type !== 2'b01 || event_note_id !== 7'd60 ||
             event_velocity !== 8'd180) begin
-            $display("FAIL: first event fields wrong before ready");
+            $display("FAIL: first event fields wrong before ready (%0d,%0d,%0d)",
+                     event_type, event_note_id, event_velocity);
             errors++;
+        end else begin
+            $display("PASS: first event = NOTE_ON 60 vel 180");
         end
 
         repeat (50) @(posedge clk);
@@ -110,46 +139,80 @@ module tb_input_event_stub;
         event_ready = 1'b1;
 
         //---------------------------------------------------------------------
-        // 等待 pattern 0 的 9 个事件
+        // 2) pattern 0 的 9 个事件顺序
         //---------------------------------------------------------------------
-        begin : wait_all
-            int guard;
-            guard = 0;
-            while (ev_idx < 9 && guard < 5000) begin
-                @(posedge clk);
-                guard++;
-            end
-            if (ev_idx < 9) begin
-                $display("FAIL: only %0d/9 events received", ev_idx);
-                errors++;
-            end
-        end
+        wait_events(9, 20000, "pattern 0 sequence");
+
+        check_event(0, 2'b01, 7'd60, 8'd180, "pattern0 #0 C4");
+        check_event(1, 2'b01, 7'd64, 8'd180, "pattern0 #1 E4");
+        check_event(2, 2'b01, 7'd67, 8'd180, "pattern0 #2 G4");
+        check_event(3, 2'b01, 7'd72, 8'd180, "pattern0 #3 C5");
+        check_event(4, 2'b10, 7'd60, 8'd0,   "pattern0 #4 C4 off");
+        check_event(5, 2'b10, 7'd64, 8'd0,   "pattern0 #5 E4 off");
+        check_event(6, 2'b10, 7'd67, 8'd0,   "pattern0 #6 G4 off");
+        check_event(7, 2'b10, 7'd72, 8'd0,   "pattern0 #7 C5 off");
+        check_event(8, 2'b11, 7'd0,  8'd0,   "pattern0 #8 ALL_OFF");
 
         //---------------------------------------------------------------------
-        // 切换到 pattern 2，应该从 0 ms 重新开始
+        // 3) 背压期间切换 pattern：未接收事件不能被撤销（清单第 6 项）
         //---------------------------------------------------------------------
         @(negedge clk);
-        test_pattern = 2'd2;
-        ev_idx = 0;
+        event_ready = 1'b0;
 
-        // pattern 2 第一项：200 ms -> NOTE_ON 69 velocity 200
-        exp_type[0] = 2'b01; exp_note[0] = 7'd69; exp_vel[0] = 8'd200;
-        exp_type[1] = 2'b10; exp_note[1] = 7'd69; exp_vel[1] = 8'd0;
+        wait_valid(20000, "next pattern0 event");
+        held_type = event_type;
+        held_note = event_note_id;
+        held_vel  = event_velocity;
+        $display("       pending event before switch: (%0d,%0d,%0d)",
+                 held_type, held_note, held_vel);
 
-        begin : wait_pattern2
-            int guard;
-            guard = 0;
-            while (ev_idx < 1 && guard < 5000) begin
-                @(posedge clk);
-                guard++;
-            end
-            if (ev_idx < 1) begin
-                $display("FAIL: pattern 2 did not restart");
-                errors++;
-            end else begin
-                $display("PASS: pattern 2 restarted and produced note 69");
-            end
+        repeat (10) @(posedge clk);
+        @(negedge clk);
+        test_pattern = 2'd2;                 // 背压中切换序列
+        repeat (30) @(posedge clk);
+
+        if (!event_valid) begin
+            $display("FAIL: pattern switch revoked the pending event");
+            errors++;
+        end else if (event_type !== held_type || event_note_id !== held_note ||
+                     event_velocity !== held_vel) begin
+            $display("FAIL: pattern switch changed pending fields: (%0d,%0d,%0d) -> (%0d,%0d,%0d)",
+                     held_type, held_note, held_vel,
+                     event_type, event_note_id, event_velocity);
+            errors++;
+        end else begin
+            $display("PASS: pending event survived pattern switch");
         end
+
+        // 放开背压：先把上一段序列的 ALL_NOTES_OFF 送完，再按新序列运行
+        @(negedge clk);
+        event_ready = 1'b1;
+        wait_events(12, 20000, "restart ALL_OFF + pattern2 first event");
+
+        check_event(9,  held_type, held_note, held_vel, "pending event delivered");
+        check_event(10, 2'b11, 7'd0,  8'd0,   "restart ALL_NOTES_OFF");
+        check_event(11, 2'b01, 7'd69, 8'd200, "pattern2 first event A4");
+
+        //---------------------------------------------------------------------
+        // 4) restart 输入：立即复位序列（input_top 切换事件源时使用）
+        //---------------------------------------------------------------------
+        @(negedge clk);
+        event_ready = 1'b0;
+        wait_valid(20000, "event before restart");
+        repeat (5) @(posedge clk);
+        @(negedge clk);
+        restart = 1'b1;
+        @(negedge clk);
+        restart = 1'b0;
+        repeat (5) @(posedge clk);
+        if (event_valid) begin
+            $display("FAIL: restart did not clear the pending event");
+            errors++;
+        end else begin
+            $display("PASS: restart clears pending event and rewinds sequence");
+        end
+        @(negedge clk);
+        event_ready = 1'b1;
 
         if (errors == 0) begin
             $display("TEST PASSED: tb_input_event_stub");
@@ -160,7 +223,7 @@ module tb_input_event_stub;
     end
 
     initial begin
-        #100_000;
+        #2_000_000;
         $display("TEST TIMEOUT: tb_input_event_stub");
         $finish;
     end

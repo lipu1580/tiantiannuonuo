@@ -319,7 +319,7 @@ FSR 是低阻电阻，节点电压天然在 0~3.3 V，且按压期间电压持�
 - 7 通道 ADC 轮询：CH0 FSR 表情、CH1 电位器、CH2~CH6 FSR 触发、CH7 备用；
 - 触发/矩阵事件仲裁：ALL_NOTES_OFF > FSR 触发 > 矩阵普通事件；
 - `MATRIX_MODE=1`：矩阵选根音/音区，FSR 触发；
-- 9 个 testbench 全部通过（含 `tb_fsr_trigger`）。
+- 11 个 testbench 全部通过（含 `tb_fsr_trigger`、`tb_key_event_decoder`）。
 
 板级/硬件侧仍需完成：
 

@@ -39,8 +39,14 @@
 //      调度顺序 CH2..CH6 -> CH0 -> CH1，触发通道优先以降低延迟。
 //   4. test_mode=1 时事件源切换为 input_event_stub，真实按键事件被排空丢弃；
 //      表情仍来自实际 ADC，waveform_sel 强制为正弦波。
+//      **切换不是组合直切**：先把下游还没接收的事件送完，再补一个
+//      ALL_NOTES_OFF，然后才换源并复位测试序列。这样既不会撤销事件，
+//      也不会让切换前的音符一直响着。
 //   5. 成员 1 的 audio_core 内部也有测试音源，两套 test_mode 不要同时打开。
 //   6. 事件优先级：ALL_NOTES_OFF > FSR 触发 > 矩阵按键。
+//   7. 事件不丢失：矩阵/FSR 两路源各自每键（每通道）有 2 个待发槽位，
+//      下游 event_ready=0 时事件留在源里，字段不变；真丢了才置
+//      input_overflow（粘滞）。
 //=============================================================================
 import audio_defs_pkg::EVENT_ALL_NOTES_OFF;
 import audio_defs_pkg::DEFAULT_VELOCITY;
@@ -68,16 +74,21 @@ module input_top #(
     //-------------------------------------------------------------------------
     // ADS7830 I2C 与采样调度
     //   I2C_QUARTER_DIV：I2C 每个 1/4 位占用的 sys_clk 拍数
-    //       27e6 / (400e3 * 4) = 16.875 -> 整数 16
-    //       实际 SCL ≈ 27e6 / (16 * 4) = 421.9 kHz
+    //       0 = 交给 adc_ads7830 自动计算（同时满足 f_SCL ≤ 400 kHz 与
+    //       Fast Mode 的 t_LOW ≥ 1.3 us；27 MHz 下得到 18，SCL ≈ 375 kHz）
+    //       **不要再用 SYS_CLK_HZ/(I2C_HZ*4) 的整数截断**：27 MHz 下会得到
+    //       16 -> 421.9 kHz、t_LOW ≈ 1.19 us，超出 ADS7830 规格。
     //   SAMPLE_INTERVAL：一次转换完成后再等待多少拍才发起下一次请求
     //       27e6 / (1e6 / 20) = 540 拍 = 20 us（ADC_SAMPLE_INTERVAL_US=20）
+    //   REQ_TIMEOUT：一次请求最多等多久（拍）。ADC 卡死/总线钳死时，
+    //       轮询不能永远停在某个通道，超时后跳过它并置 adc_timeout_debug。
     //   7 通道轮询：CH2 CH3 CH4 CH5 CH6(FSR 触发) -> CH0(FSR 表情) -> CH1(POT) -> 循环
-    //       单次 I2C 事务（地址+命令+读）约 100 us，加 20 us 间隔
-    //       一轮 7 通道约 0.84 ms
+    //       单次 I2C 事务（地址+命令+读）约 130 us，加 20 us 间隔
+    //       一轮 7 通道约 1 ms
     //-------------------------------------------------------------------------
-    parameter integer I2C_QUARTER_DIV  = SYS_CLK_HZ / (project_params_pkg::ADC_I2C_HZ * 4),
+    parameter integer I2C_QUARTER_DIV  = 0,
     parameter integer SAMPLE_INTERVAL  = SYS_CLK_HZ / (1_000_000 / project_params_pkg::ADC_SAMPLE_INTERVAL_US),
+    parameter integer REQ_TIMEOUT      = SYS_CLK_HZ / (1_000_000 / project_params_pkg::ADC_REQ_TIMEOUT_US),
     parameter logic [2:0] FSR_CHANNEL  = project_params_pkg::FSR_ADC_CHANNEL,      // FSR 接 CH0
     parameter logic [2:0] POT_CHANNEL  = project_params_pkg::POT_ADC_CHANNEL,      // 电位器接 CH1
 
@@ -104,7 +115,14 @@ module input_top #(
     parameter integer     TRIG_REL_SAMP  = project_params_pkg::TRIGGER_RELEASE_SAMPLES,  // 释放确认样本数
     parameter integer     TRIG_OFF_MS    = project_params_pkg::TRIGGER_NOTE_OFF_MS,      // 兜底 NOTE_OFF 时间
     parameter integer     TRIG_RETRIG_MS = project_params_pkg::TRIGGER_RETRIGGER_MS,     // 防重复触发窗口
-    parameter logic [7:0] TRIG_VEL_FULL  = project_params_pkg::TRIGGER_VEL_FULL_SCALE    // 力度满量程 ADC 值
+    parameter logic [7:0] TRIG_VEL_FULL  = project_params_pkg::TRIGGER_VEL_FULL_SCALE,   // 力度满量程 ADC 值
+
+    //-------------------------------------------------------------------------
+    // 波形切换上限：K14 循环 0..WAVEFORM_MAX_SEL
+    //   成员 1 的 waveform_rom 目前只实现正弦波，切到 1/2 会静音，
+    //   所以默认只允许正弦；波表补齐后再改成 1 或 2。
+    //-------------------------------------------------------------------------
+    parameter logic [1:0] WAVEFORM_MAX_SEL = project_params_pkg::WAVEFORM_MAX_SEL
 )(
     //-------------------------------------------------------------------------
     // 时钟与复位（整颗模块单时钟域）
@@ -173,8 +191,42 @@ module input_top #(
     output logic [4:0]  piezo_peak_rst,      // 旧压电峰值放电：新方案无此硬件，恒为 0（保留端口兼容板级约束）
     output logic [4:0]  piezo_hit_debug,     // 5 路 FSR 电平是否超过阈值
     output logic [4:0]  piezo_active_debug,  // 5 路 FSR 是否正在发声
-    output logic [6:0]  base_note_debug      // 当前根音（含八度）
+    output logic [6:0]  base_note_debug,     // 当前根音（含八度）
+
+    //-------------------------------------------------------------------------
+    // 矩阵组合告警（无二极管矩阵的固有限制，详见 docs/input_pin_requirements.md）
+    //-------------------------------------------------------------------------
+    output logic        key_ghost_debug,     // 2x2 内 >=3 键：存在鬼键组合
+    output logic        key_conflict_debug,  // 同列跨行双键：行驱动会互相争用
+
+    //-------------------------------------------------------------------------
+    // ADC 调度告警
+    //-------------------------------------------------------------------------
+    output logic        adc_timeout_debug    // 采样请求超时（总线卡死/从机无响应）
 );
+
+    //-------------------------------------------------------------------------
+    // 板级输入信号的跨时钟域同步
+    //   test_mode / test_pattern 来自拨码开关，与 sys_clk 异步。
+    //   直接组合使用会让事件源切换出现毛刺，也容易在切换窗口里改动字段，
+    //   因此先做两级同步，后面所有逻辑只用同步后的值。
+    //-------------------------------------------------------------------------
+    logic test_mode_sync1, test_mode_s;
+    logic [1:0] pattern_sync1, pattern_s;
+
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n) begin
+            test_mode_sync1 <= 1'b0;
+            test_mode_s     <= 1'b0;
+            pattern_sync1   <= 2'd0;
+            pattern_s       <= 2'd0;
+        end else begin
+            test_mode_sync1 <= test_mode;
+            test_mode_s     <= test_mode_sync1;
+            pattern_sync1   <= test_pattern;
+            pattern_s       <= pattern_sync1;
+        end
+    end
 
     //-------------------------------------------------------------------------
     // 按键扫描 + 消抖
@@ -197,7 +249,9 @@ module input_top #(
         .key_col           (key_col),
         .raw_key_state     (raw_key_state),
         .scan_row_debug    (),
-        .scan_sample_debug ()
+        .scan_sample_debug (),
+        .ghost_detect      (key_ghost_debug),
+        .row_conflict      (key_conflict_debug)
     );
 
     key_debounce #(
@@ -234,12 +288,18 @@ module input_top #(
     localparam integer ADC_SCAN_COUNT  = 7;
     localparam integer SAMPLE_WAIT_MAX = (SAMPLE_INTERVAL < 4) ? 4 : SAMPLE_INTERVAL;
     localparam integer WAIT_W          = $clog2(SAMPLE_WAIT_MAX + 1);
+    // 请求看门狗至少要给 ADC 几个拍来拉高 busy（仿真里时钟被压得很低）
+    localparam integer REQ_TIMEOUT_CYC = (REQ_TIMEOUT < 16) ? 16 : REQ_TIMEOUT;
+    localparam integer REQ_W           = $clog2(REQ_TIMEOUT_CYC + 2);
+
 
     logic [WAIT_W-1:0] sample_wait;     // 空闲等待计数器
     logic              req_pending;     // 有请求待 ADC 接收
     logic [2:0]        scan_idx;        // 7 通道轮询位置
     logic [2:0]        adc_ch_sel;      // 本轮通道
     logic              sample_busy_d;   // busy 打一拍
+    logic [REQ_W-1:0]  req_wait;                // 请求等待拍数（看门狗）
+    logic              adc_timeout_r;           // 请求超时（粘滞）
 
     logic              sample_req;      // 请求电平
     logic              sample_busy;     // ADC 忙
@@ -267,10 +327,12 @@ module input_top #(
 
     always_ff @(posedge sys_clk) begin
         if (!rst_n) begin
-            sample_wait   <= '0;
-            req_pending   <= 1'b0;
-            scan_idx      <= 3'd0;
-            sample_busy_d <= 1'b0;
+            sample_wait    <= '0;
+            req_pending    <= 1'b0;
+            scan_idx       <= 3'd0;
+            sample_busy_d  <= 1'b0;
+            req_wait       <= '0;
+            adc_timeout_r  <= 1'b0;
         end else begin
             sample_busy_d <= sample_busy;   // 用于检测 busy 的 0->1
 
@@ -279,15 +341,31 @@ module input_top #(
                 // 清 pending、重新计时，并前进到下一个通道
                 req_pending <= 1'b0;
                 sample_wait <= '0;
+                req_wait    <= '0;
                 scan_idx    <= (scan_idx == 3'(ADC_SCAN_COUNT - 1))
                                ? 3'd0 : scan_idx + 1'b1;
             end else if (!req_pending && !sample_busy) begin
                 // 空闲且没有待发请求：等够 SAMPLE_INTERVAL 后置 pending
+                req_wait <= '0;
                 if (sample_wait == WAIT_W'(SAMPLE_WAIT_MAX - 1)) begin
                     sample_wait <= '0;
                     req_pending <= 1'b1;
                 end else begin
                     sample_wait <= sample_wait + 1'b1;
+                end
+            end else if (req_pending && !sample_busy) begin
+                // 请求已发出但 ADC 迟迟不接（总线钳死 / 从机无响应）：
+                // 超时后跳过本通道继续轮询，避免整条输入链路永久卡住。
+                // FSR 侧在“长时间没有新样本”时会走兜底 NOTE_OFF。
+                if (req_wait >= REQ_W'(REQ_TIMEOUT_CYC - 1)) begin
+                    req_wait      <= '0;
+                    req_pending   <= 1'b0;
+                    sample_wait   <= '0;
+                    adc_timeout_r <= 1'b1;
+                    scan_idx      <= (scan_idx == 3'(ADC_SCAN_COUNT - 1))
+                                     ? 3'd0 : scan_idx + 1'b1;
+                end else begin
+                    req_wait <= req_wait + 1'b1;
                 end
             end
         end
@@ -359,7 +437,7 @@ module input_top #(
         .sample_data      (sample_data),
         .pot_channel      (POT_CHANNEL),
         .waveform_key_sel (waveform_key),
-        .test_mode        (test_mode),
+        .test_mode        (test_mode_s),
         .pitch_bend       (pitch_bend),
         .pot_raw          (),
         .expr_valid       (),
@@ -405,6 +483,12 @@ module input_top #(
 
     logic [6:0]  base_note;       // 当前根音（含八度）
     logic        trig_all_off;    // ALL_NOTES_OFF 被接收时清触发状态
+    logic        stub_restart;    // 事件源切换完成：复位测试序列
+    logic        trig_flush;      // 事件源切换完成：清空触发器的积压事件
+
+    // 两路事件源各自的“槽位溢出”标志（粘滞）。为 1 说明极端背压下真丢过事件。
+    logic        matrix_overflow;
+    logic        trig_overflow;
 
     logic        queue_wr_valid;
     logic        queue_wr_ready;
@@ -424,10 +508,11 @@ module input_top #(
     //   MATRIX_MODE=1：K0~K11 只更新 base_note，不发 NOTE_ON（最终模式）
     //-------------------------------------------------------------------------
     key_event_decoder #(
-        .KEY_COUNT      (KEY_COUNT),
-        .NOTE_KEY_COUNT (12),
-        .BASE_NOTE      (BASE_NOTE),
-        .MATRIX_MODE    (MATRIX_MODE)
+        .KEY_COUNT        (KEY_COUNT),
+        .NOTE_KEY_COUNT   (12),
+        .BASE_NOTE        (BASE_NOTE),
+        .MATRIX_MODE      (MATRIX_MODE),
+        .WAVEFORM_MAX_SEL (WAVEFORM_MAX_SEL)
     ) u_decoder (
         .sys_clk          (sys_clk),
         .rst_n            (rst_n),
@@ -443,7 +528,8 @@ module input_top #(
         .octave_offset    (octave_debug),
         .waveform_sel     (waveform_key),
         .base_note        (base_note),
-        .active_note_mask ()
+        .active_note_mask (),
+        .event_overflow   (matrix_overflow)
     );
 
     //-------------------------------------------------------------------------
@@ -468,7 +554,7 @@ module input_top #(
         .sample_data        (sample_data),
         .trig_ch_base       (TRIG_BASE_CH),
         .base_note          (base_note),
-        .all_off            (trig_all_off),
+        .all_off            (trig_flush),
         .event_req_valid    (trig_req_valid),
         .event_req_ready    (trig_req_ready),
         .event_req_type     (trig_req_type),
@@ -476,7 +562,8 @@ module input_top #(
         .event_req_velocity (trig_req_vel),
         .hit_debug          (piezo_hit_debug),
         .active_debug       (piezo_active_debug),
-        .level_debug        ()
+        .level_debug        (),
+        .event_overflow     (trig_overflow)
     );
 
     // 旧压电方案的峰值电容放电已不存在，端口固化输出 0（兼容板级约束）
@@ -502,56 +589,24 @@ module input_top #(
     end
 
     //-------------------------------------------------------------------------
-    // 输出保持（1 深度 skid buffer）
+    // 输出保持
     //
-    //   目的：满足 valid/ready 协议——一旦 queue_wr_valid=1，字段必须保持到
-    //   queue_wr_ready=1。上游（矩阵译码器/FSR 触发）在背压期间可能产生
-    //   新事件，若直接组合输出，字段会被改写（记 F-17）。
-    //
-    //   规则：
-    //     - skid 空且 FIFO 能收：本拍直接写入 FIFO，源收到 ready；
-    //     - skid 空且 FIFO 满：本拍把事件锁进 skid，源仍收到 ready；
-    //     - skid 非空：只把 skid 里的事件送去 FIFO，源暂时不给 ready。
+    //   两路源都是“保持式”的：每键 / 每触发通道都有 2 个待发槽位，事件在
+    //   被 event_req_ready 接收之前，字段一定不会变。所以这里不需要额外的
+    //   skid buffer，只要保证“仲裁结果在握手完成前不会变”即可：
+    //     - queue_wr_valid 由 queue_wr_ready 门控，只在真能写进 FIFO 的那一
+    //       拍才拉高，因此 event_queue 永远不会丢事件（wr_valid&&!wr_ready
+    //       不可能出现），它的 overflow 也就不会误报；
+    //     - 是否真的丢过事件，由两路源自己的槽位溢出标志报告（见下方）。
     //-------------------------------------------------------------------------
-    logic        hold_valid;
-    logic [1:0]  hold_type;
-    logic [6:0]  hold_note;
-    logic [7:0]  hold_vel;
+    assign queue_wr_valid = (matrix_sel | trig_sel) && queue_wr_ready;
+    assign queue_wr_type  = matrix_sel ? matrix_req_type : trig_req_type;
+    assign queue_wr_note  = matrix_sel ? matrix_req_note : trig_req_note;
+    assign queue_wr_vel   = matrix_sel ? matrix_req_vel  : trig_req_vel;
 
-    wire sel_valid = matrix_sel | trig_sel;
-
-    always_ff @(posedge sys_clk) begin
-        if (!rst_n) begin
-            hold_valid <= 1'b0;
-            hold_type  <= 2'b00;
-            hold_note  <= '0;
-            hold_vel   <= '0;
-        end else if (hold_valid) begin
-            if (queue_wr_ready) begin
-                hold_valid <= 1'b0;
-            end
-        end else if (sel_valid && !queue_wr_ready) begin
-            // FIFO 本拍收不下：先存进 skid，保证字段不再变化
-            hold_valid <= 1'b1;
-            hold_type  <= matrix_sel ? matrix_req_type : trig_req_type;
-            hold_note  <= matrix_sel ? matrix_req_note : trig_req_note;
-            hold_vel   <= matrix_sel ? matrix_req_vel  : trig_req_vel;
-        end
-    end
-
-    // 只有确实能进 FIFO 时才拉高 valid，避免被 event_queue 误判为 overflow。
-    // wr_ready 只由 FIFO 内部计数决定，不依赖 wr_valid，所以这样门控是安全的。
-    assign queue_wr_valid = (hold_valid || sel_valid) && queue_wr_ready;
-    assign queue_wr_type  = hold_valid ? hold_type :
-                            (matrix_sel ? matrix_req_type : trig_req_type);
-    assign queue_wr_note  = hold_valid ? hold_note :
-                            (matrix_sel ? matrix_req_note : trig_req_note);
-    assign queue_wr_vel   = hold_valid ? hold_vel  :
-                            (matrix_sel ? matrix_req_vel  : trig_req_vel);
-
-    // 源在事件被 FIFO 或 skid 接收后即可清除槽位
-    assign matrix_req_ready = matrix_sel && !hold_valid;
-    assign trig_req_ready   = trig_sel   && !hold_valid;
+    // 源在事件被 FIFO 接收后即可清除槽位
+    assign matrix_req_ready = matrix_sel && queue_wr_ready;
+    assign trig_req_ready   = trig_sel   && queue_wr_ready;
 
     // ALL_OFF 被 FIFO 接收的同拍，通知 fsr_trigger 清活跃状态/待发事件
     assign trig_all_off = matrix_req_valid &&
@@ -561,6 +616,8 @@ module input_top #(
     //-------------------------------------------------------------------------
     // 事件 FIFO
     //-------------------------------------------------------------------------
+    logic queue_fifo_overflow;
+
     event_queue #(
         .DEPTH  (EVENT_FIFO_DEPTH),
         .NOTE_W (7)
@@ -577,15 +634,15 @@ module input_top #(
         .rd_type        (queue_type),
         .rd_note        (queue_note),
         .rd_vel         (queue_vel),
-        .overflow       (input_overflow),
+        .overflow       (queue_fifo_overflow),
         .overflow_clear (1'b0),
         .level          ()
     );
 
     //-------------------------------------------------------------------------
     // 无硬件测试事件源
-    //   只有 test_mode=1 时它才被接到输出；否则 stub_ready 恒为 0，
-    //   它的事件会一直停在 valid=1，不会影响真实事件链路。
+    //   只有事件源切到测试模式时它才被接到输出；其余时间 stub_ready=0，
+    //   它的待发事件会一直保持，但不会影响真实事件链路。
     //-------------------------------------------------------------------------
     logic       stub_valid;
     logic       stub_ready;
@@ -598,7 +655,8 @@ module input_top #(
     ) u_event_stub (
         .sys_clk       (sys_clk),
         .rst_n         (rst_n),
-        .test_pattern  (test_pattern),
+        .test_pattern  (pattern_s),
+        .restart       (stub_restart),
         .event_valid   (stub_valid),
         .event_ready   (stub_ready),
         .event_type    (stub_type),
@@ -607,37 +665,150 @@ module input_top #(
     );
 
     //-------------------------------------------------------------------------
-    // 事件源选择
+    // 事件源切换（测试模式 <-> 真实输入）
     //
-    //   非测试模式：
-    //     queue_valid/queue_* 直接送到 event_*；queue_ready = event_ready，
-    //     FIFO 中的事件在下游接收时弹出。
+    //   直接把 event_valid 在 stub 和 queue 之间组合切换，会在
+    //   event_valid=1 && event_ready=0 时撤销下游还没接收的事件，
+    //   切换前后的音符也可能挂住（评审清单第 5 项）。
     //
-    //   测试模式：
-    //     stub_valid/stub_* 送到 event_*；stub_ready = event_ready；
-    //     同时 queue_ready 恒为 1，把真实按键事件“排空丢弃”，避免 FIFO
-    //     长期堵塞后溢出或把旧事件带到退出测试模式之后。
+    //   因此切换分三步：
+    //     M_RUN   ：正常输出，事件按 src_test_r 选择来源；
+    //     M_WAIT  ：只把“当前呈现的事件”送出去（呈现中的事件一定不会被撤销），
+    //               真实输入侧会把 FIFO 里的事件逐个交付完；
+    //     M_ALLOFF：发一个合成的 ALL_NOTES_OFF，释放上一来源留下的音符；
+    //   然后才真正换源，并复位测试序列。
+    //
+    //   注意：M_WAIT 会一直等到下游接收当前事件（协议要求不得撤销事件）。
+    //   如果 audio_core 长时间不拉高 event_ready，模式切换就会停在这里，
+    //   这是“宁可慢也不丢事件”的取舍。
     //-------------------------------------------------------------------------
-    assign stub_ready  = test_mode ? event_ready : 1'b0;
-    assign queue_ready = test_mode ? 1'b1        : event_ready;
+    localparam logic [1:0] M_RUN    = 2'd0;
+    localparam logic [1:0] M_WAIT   = 2'd1;
+    localparam logic [1:0] M_ALLOFF = 2'd2;
 
-    assign event_valid    = test_mode ? stub_valid : queue_valid;
-    assign event_type     = test_mode ? stub_type  : queue_type;
-    assign event_note_id  = test_mode ? stub_note  : queue_note;
-    assign event_velocity = test_mode ? stub_vel   : queue_vel;
+    logic [1:0]  mode_state;
+    logic        src_test_r;      // 当前生效的事件源：0=FIFO 1=stub
+    logic        ev_any;          // 已经送出过事件（上电首次切换不需要 ALL_OFF）
+
+    logic        ev_out_valid;
+    logic [1:0]  ev_out_type;
+    logic [6:0]  ev_out_note;
+    logic [7:0]  ev_out_vel;
+
+    always_comb begin
+        if (mode_state == M_ALLOFF) begin
+            ev_out_valid = 1'b1;
+            ev_out_type  = EVENT_ALL_NOTES_OFF;
+            ev_out_note  = 7'd0;
+            ev_out_vel   = 8'd0;
+        end else if (src_test_r) begin
+            ev_out_valid = stub_valid;
+            ev_out_type  = stub_type;
+            ev_out_note  = stub_note;
+            ev_out_vel   = stub_vel;
+        end else begin
+            ev_out_valid = queue_valid;
+            ev_out_type  = queue_type;
+            ev_out_note  = queue_note;
+            ev_out_vel   = queue_vel;
+        end
+    end
+
+    // 握手：只有“事件真的被下游接收”才让源前进
+    //   - 真实输入侧（M_RUN / M_WAIT）用下游的 event_ready，绝不提前弹出；
+    //   - 测试模式运行时 queue_ready 恒为 1：真实输入的事件被排空丢弃
+    //     （测试模式本来就该忽略键盘，且退出时会补 ALL_NOTES_OFF）；
+    //   - M_ALLOFF 期间 queue_ready=1 同样只是丢弃，因为此刻呈现的是
+    //     合成的 ALL_NOTES_OFF。
+    assign stub_ready  = src_test_r && (mode_state != M_ALLOFF) && event_ready;
+    assign queue_ready = (!src_test_r && (mode_state != M_ALLOFF)) ? event_ready
+                                                                   : 1'b1;
+
+
+    assign event_valid    = ev_out_valid;
+    assign event_type     = ev_out_type;
+    assign event_note_id  = ev_out_note;
+    assign event_velocity = ev_out_vel;
+
+    // 切换完成那一刻复位测试序列，避免把切换前残留的事件重新播出来
+    assign stub_restart = (mode_state == M_ALLOFF) && event_valid && event_ready;
+
+    // 切换完成后，通知触发器/译码器丢弃切换前积压的事件
+    //   （ALL_OFF 已经保证声部被释放，残留事件再送出去只会播放错音）
+    assign trig_flush = trig_all_off || stub_restart;
+
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n) begin
+            mode_state <= M_RUN;
+            src_test_r <= 1'b0;
+            ev_any     <= 1'b0;
+        end else begin
+            if (event_valid && event_ready) begin
+                ev_any <= 1'b1;
+            end
+
+            case (mode_state)
+                M_RUN: begin
+                    if (test_mode_s != src_test_r) begin
+                        if (!ev_any) begin
+                            // 还没输出过事件：直接换源，不需要 ALL_OFF
+                            src_test_r <= test_mode_s;
+                        end else begin
+                            mode_state <= M_WAIT;
+                        end
+                    end
+                end
+
+                M_WAIT: begin
+                    // 只等“呈现中的事件”被下游接收；绝不撤销它
+                    if (!ev_out_valid) begin
+                        mode_state <= M_ALLOFF;
+                    end
+                end
+
+                default: begin // M_ALLOFF
+                    if (event_valid && event_ready) begin
+                        // ALL_OFF 已被接收，现在换源
+                        src_test_r <= test_mode_s;
+                        mode_state <= M_RUN;
+                    end
+                end
+            endcase
+        end
+    end
+
+    //-------------------------------------------------------------------------
+    // 事件丢失标志
+    //   FIFO 的写入由 wr_ready 门控，正常情况不会丢；
+    //   真正的风险在两路源的待发槽位（每键/每通道只有 2 个），
+    //   溢出时对应源会置粘滞标志，这里汇总给调试端口。
+    //-------------------------------------------------------------------------
+    logic ovf_latch;
+
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n) begin
+            ovf_latch <= 1'b0;
+        end else begin
+            ovf_latch <= ovf_latch | matrix_overflow | trig_overflow |
+                         queue_fifo_overflow;
+        end
+    end
+
+    assign input_overflow = ovf_latch;
 
     //-------------------------------------------------------------------------
     // 调试
-    //   input_state[3] = test_mode
+    //   input_state[3] = test_mode（同步后）
     //   input_state[2] = pressure_valid
     //   input_state[1] = adc_busy
     //   input_state[0] = event_valid
     //   piezo_*_debug 单独给出，便于观察 5 路 FSR 触发状态。
     //-------------------------------------------------------------------------
-    assign adc_busy       = sample_busy;
-    assign adc_valid      = sample_valid;
-    assign adc_bus_error  = adc_bus_error_r;
-    assign input_state    = {test_mode, pressure_valid, sample_busy, event_valid};
+    assign adc_busy        = sample_busy;
+    assign adc_valid       = sample_valid;
+    assign adc_bus_error   = adc_bus_error_r;
+    assign adc_timeout_debug = adc_timeout_r;
+    assign input_state     = {test_mode_s, pressure_valid, sample_busy, event_valid};
     assign base_note_debug = base_note;
 
 endmodule

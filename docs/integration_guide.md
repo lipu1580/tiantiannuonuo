@@ -115,7 +115,11 @@ module tang_nano20k_top (
         .octave_debug   (),
         .piezo_hit_debug    (),
         .piezo_active_debug (),
-        .base_note_debug    ()
+        .base_note_debug    (),
+        // 新增的只输出调试端口，板级可以不接（悬空即可）
+        .key_ghost_debug    (),   // 2x2 内 >=3 键：可能误读
+        .key_conflict_debug (),   // 同列跨行 >=2 键：行驱动争用
+        .adc_timeout_debug  ()    // ADC 请求看门狗超时
     );
 
     //---------------------------------------------------------------------
@@ -234,6 +238,9 @@ endmodule
 - 事件 FIFO 深度为 8。若成员 1 长时间拉低 `event_ready`，请监控
   `input_overflow`。
 - `input_top.test_mode=1` 时真实按键事件会被排空丢弃，但 FSR/电位器仍在采样。
+- 切换 `test_mode` 不是组合直切：内部会先把在途事件送完、再补一个
+  `ALL_NOTES_OFF`，然后才换源，因此不会丢掉下游尚未接收的事件，
+  也不会挂着切换前的音符。
 - ADS7830 的 SDA 必须在板级顶层接成双向，不能只接成 output。
 - 若成员 1 的 `audio_core` 端口名称有更新，以成员 1 的正式接口为准，
   但 `event_*` / `expr_*` 的位宽和编码不得改变。

@@ -29,6 +29,7 @@ INC       := -I$(COMMON)
 TBS := \
 	tb_key_scan \
 	tb_key_debounce \
+	tb_key_event_decoder \
 	tb_adc_ads7830 \
 	tb_fsr_filter \
 	tb_expression_mapper \
@@ -87,7 +88,12 @@ sim: $(addprefix $(BUILD)/,$(addsuffix .vvp,$(TBS)))
 		echo "=============================================================="; \
 		echo "RUN $$t"; \
 		echo "=============================================================="; \
-		$(VVP) $(BUILD)/$$t.vvp | tee $(BUILD)/$$t.log; \
+		if ! $(VVP) $(BUILD)/$$t.vvp > $(BUILD)/$$t.log 2>&1; then \
+			cat $(BUILD)/$$t.log; \
+			echo "$$t FAILED (simulator exit status != 0)"; \
+			exit 1; \
+		fi; \
+		cat $(BUILD)/$$t.log; \
 		grep -q "TEST PASSED" $(BUILD)/$$t.log || { echo "$$t FAILED"; exit 1; }; \
 	done
 
@@ -97,7 +103,12 @@ sim-audio: $(addprefix $(BUILD)/,$(addsuffix .vvp,$(AUDIO_TBS)))
 		echo "=============================================================="; \
 		echo "RUN $$t"; \
 		echo "=============================================================="; \
-		$(VVP) $(BUILD)/$$t.vvp | tee $(BUILD)/$$t.log; \
+		if ! $(VVP) $(BUILD)/$$t.vvp > $(BUILD)/$$t.log 2>&1; then \
+			cat $(BUILD)/$$t.log; \
+			echo "$$t FAILED (simulator exit status != 0)"; \
+			exit 1; \
+		fi; \
+		cat $(BUILD)/$$t.log; \
 		grep -qE "PASS|cycle_count = " $(BUILD)/$$t.log || { echo "$$t FAILED"; exit 1; }; \
 	done
 
@@ -109,7 +120,12 @@ sim-v: | $(BUILD)
 		echo "=============================================================="; \
 		$(VERILATOR) --binary --timing -j 1 -Wno-fatal -Wno-lint $(INC) \
 			--top-module $$t sim/$$t.sv $(PKG) $(RTL_ALL) -o $$t --Mdir obj_$$t; \
-		./obj_$$t/$$t | tee $(BUILD)/$$t.log; \
+		if ! ./obj_$$t/$$t > $(BUILD)/$$t.log 2>&1; then \
+			cat $(BUILD)/$$t.log; \
+			echo "$$t FAILED (simulator exit status != 0)"; \
+			exit 1; \
+		fi; \
+		cat $(BUILD)/$$t.log; \
 		grep -qE "PASS" $(BUILD)/$$t.log || { echo "$$t FAILED"; exit 1; }; \
 	done
 

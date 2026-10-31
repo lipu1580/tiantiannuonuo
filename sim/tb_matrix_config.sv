@@ -39,10 +39,13 @@ module tb_matrix_config;
     always #5 clk = ~clk;
 
     key_event_decoder #(
-        .KEY_COUNT      (16),
-        .NOTE_KEY_COUNT (12),
-        .BASE_NOTE      (7'd60),
-        .MATRIX_MODE    (1)
+        .KEY_COUNT        (16),
+        .NOTE_KEY_COUNT   (12),
+        .BASE_NOTE        (7'd60),
+        .MATRIX_MODE      (1),
+        // 这里显式打开 3 档波形循环，验证 0->1->2->0 的切换逻辑本身。
+        // 默认值（WAVEFORM_MAX_SEL=0）只切正弦，见 tb_input_top 的说明。
+        .WAVEFORM_MAX_SEL (2'd2)
     ) dut (
         .sys_clk            (clk),
         .rst_n              (rst_n),

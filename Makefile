@@ -1,9 +1,12 @@
 #=============================================================================
-# 成员 2 输入侧工程 Makefile
+# 三人合并工程 Makefile（输入 + 音频 + 输出）
 #
-#   make lint        仅做 Verilator 语法/位宽检查
-#   make sim         编译并运行全部 testbench（日志写入 build/*.log）
-#   make run-TB      运行单个 testbench，例如：make run-tb_input_top
+#   make lint        输入侧 Verilator 检查
+#   make sim         输入侧全部 testbench（iverilog）
+#   make sim-audio   音频侧（兼容 iverilog 的）testbench
+#   make sim-v       音频集成 testbench（需 Verilator）
+#   make sim-all     sim + sim-audio + sim-v
+#   make run-<tb>    运行单个 testbench，例如：make run-tb_input_top
 #   make clean       清理 build 目录
 #
 #   工具链：Icarus Verilog 12+ / Verilator 5+
@@ -14,10 +17,12 @@ VVP       ?= vvp
 VERILATOR ?= verilator
 
 BUILD     := build
-RTL_DIR   := rtl/input
 COMMON    := rtl/common
 PKG       := $(COMMON)/packages.sv
-RTL       := $(wildcard $(RTL_DIR)/*.sv)
+RTL_INPUT := $(wildcard rtl/input/*.sv) $(wildcard rtl/input/top/*.sv)
+RTL_AUDIO := $(wildcard rtl/audio/*.sv) $(wildcard rtl/audio_out/*.sv)
+RTL_ALL   := $(RTL_INPUT) $(RTL_AUDIO)
+RTL       := $(RTL_ALL)
 MODEL     := sim/ads7830_model.sv
 INC       := -I$(COMMON)
 
@@ -32,7 +37,25 @@ TBS := \
 	tb_input_event_stub \
 	tb_input_top
 
-.PHONY: all lint sim clean help
+# 兼容 iverilog 的音频 testbench
+AUDIO_TBS := \
+	tb_adsr \
+	tb_dds_oscillator \
+	tb_note_freq_lut \
+	tb_pcm_stream_adapter \
+	tb_sample_tick_gen \
+	tb_section2 \
+	tb_voice \
+	tb_waveform_rom
+
+# 使用了 iverilog 不支持的 SV 特性，必须用 Verilator 跑
+VTB := \
+	tb_audio_core \
+	tb_audio_test_source \
+	tb_event_router \
+	tb_voice_manager
+
+.PHONY: all lint lint-audio sim sim-audio sim-v sim-all clean help
 
 all: lint sim
 
@@ -44,14 +67,12 @@ help:
 
 lint:
 	$(VERILATOR) --lint-only -Wall -Wno-fatal -Wno-PINCONNECTEMPTY \
-		$(INC) --top-module input_top $(PKG) $(RTL)
+		$(INC) --top-module input_top $(PKG) $(RTL_INPUT)
 
-#目标与tb文件
-WAIT_TB_NAME := audio_test_source
-TB_NAME := tb_$(WAIT_TB_NAME)
-suffix := .sv
-RTL_FILE = $(wildcard rtl/audio/*.sv)
-TB_FILE = $(addsuffix $(suffix), $(TB_NAME))
+lint-audio:
+	$(VERILATOR) --lint-only -Wall -Wno-fatal -Wno-PINCONNECTEMPTY \
+		$(INC) --top-module audio_core $(PKG) $(RTL_AUDIO)
+
 $(BUILD):
 	mkdir -p $(BUILD)
 
@@ -69,8 +90,32 @@ sim: $(addprefix $(BUILD)/,$(addsuffix .vvp,$(TBS)))
 		grep -q "TEST PASSED" $(BUILD)/$$t.log || { echo "$$t FAILED"; exit 1; }; \
 	done
 
+sim-audio: $(addprefix $(BUILD)/,$(addsuffix .vvp,$(AUDIO_TBS)))
+	@set -e; \
+	for t in $(AUDIO_TBS); do \
+		echo "=============================================================="; \
+		echo "RUN $$t"; \
+		echo "=============================================================="; \
+		$(VVP) $(BUILD)/$$t.vvp | tee $(BUILD)/$$t.log; \
+		grep -qE "PASS|cycle_count = " $(BUILD)/$$t.log || { echo "$$t FAILED"; exit 1; }; \
+	done
+
+sim-v: | $(BUILD)
+	@set -e; \
+	for t in $(VTB); do \
+		echo "=============================================================="; \
+		echo "RUN $$t (Verilator)"; \
+		echo "=============================================================="; \
+		$(VERILATOR) --binary --timing -j 1 -Wno-fatal -Wno-lint $(INC) \
+			--top-module $$t sim/$$t.sv $(PKG) $(RTL_ALL) -o $$t --Mdir obj_$$t; \
+		./obj_$$t/$$t | tee $(BUILD)/$$t.log; \
+		grep -qE "PASS" $(BUILD)/$$t.log || { echo "$$t FAILED"; exit 1; }; \
+	done
+
+sim-all: sim sim-audio sim-v
+
 run-%: $(BUILD)/%.vvp
 	$(VVP) $< | tee $(BUILD)/$*.log
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf $(BUILD) obj_tb_*

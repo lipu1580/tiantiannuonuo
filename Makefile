@@ -46,6 +46,12 @@ lint:
 	$(VERILATOR) --lint-only -Wall -Wno-fatal -Wno-PINCONNECTEMPTY \
 		$(INC) --top-module input_top $(PKG) $(RTL)
 
+#目标与tb文件
+WAIT_TB_NAME := audio_test_source
+TB_NAME := tb_$(WAIT_TB_NAME)
+suffix := .sv
+RTL_FILE = $(wildcard rtl/audio/*.sv)
+TB_FILE = $(addsuffix $(suffix), $(TB_NAME))
 $(BUILD):
 	mkdir -p $(BUILD)
 

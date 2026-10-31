@@ -1,3 +1,4 @@
+`timescale 1ns/1ns
 // 临时逻辑集成接口；真实板级端口等待成员3确认。
 // 板级顶层在 sys_clk 域内接入 sample_tick_gen，生成 audio_core 的 audio_ce。
 module tang_nano20k_top #(
@@ -30,4 +31,42 @@ module tang_nano20k_top #(
     output logic [$clog2(VOICE_COUNT+1)-1:0]  active_voice_count, // 活跃声部数量
     output logic [VOICE_COUNT-1:0]            voice_active // 每个声部的活跃标志
 );
+    logic audio_ce;
+
+    sample_tick_gen #(
+        .SYS_CLK_HZ (SYS_CLK_HZ /* default 27_000_000 */),
+        .SAMPLE_RATE(SAMPLE_RATE /* default 48_000 */)
+     ) sample_tick_gen (
+        .sys_clk (sys_clk),
+        .rst_n   (rst_n),
+        .audio_ce(audio_ce)
+    );
+
+    audio_core #(
+        .VOICE_COUNT   (VOICE_COUNT /* default 4 */),
+        .NOTE_W        (NOTE_W /* default 7 */),
+        .SAMPLE_W      (SAMPLE_W /* default 16 */),
+        .SAMPLE_RATE   (SAMPLE_RATE /* default 48_000 */)
+     ) audio_core (
+        .sys_clk           (sys_clk),
+        .rst_n             (rst_n),
+        .audio_ce          (audio_ce),
+        .event_valid       (event_valid),
+        .event_ready       (event_ready),
+        .event_type        (event_type),
+        .event_note_id     (event_note_id),
+        .event_velocity    (event_velocity),
+        .expr_valid        (expr_valid),
+        .expression        (expression),
+        .pitch_bend        (pitch_bend),
+        .waveform_sel      (waveform_sel),
+        .pcm_valid         (pcm_valid),
+        .pcm_ready         (pcm_ready),
+        .pcm_left          (pcm_left),
+        .pcm_right         (pcm_right),
+        .test_mode         (test_mode),
+        .test_pattern      (test_pattern),
+        .active_voice_count(active_voice_count),
+        .voice_active      (voice_active)
+    );
 endmodule

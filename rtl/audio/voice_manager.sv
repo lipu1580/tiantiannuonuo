@@ -32,7 +32,15 @@ module voice_manager #(
     logic [VOICE_COUNT-1:0] occupied;
     logic accepet_note_on, accepet_note_off, accepet_all_notes_off, accepet_nop;
     logic [VOICE_COUNT-1:0] target, same_note_id_target, free_target, full_target;
-    logic [VOICE_COUNT-1:0] order [0:VOICE_COUNT-1];
+    // LRU 顺序表：打包成向量，避免在 for 循环内对非打包数组做非阻塞赋值
+    // （iverilog/Verilator/部分综合工具对后者的支持不一致）
+    localparam integer ORD_W = (VOICE_COUNT <= 1) ? 1 : $clog2(VOICE_COUNT);
+    logic [VOICE_COUNT*ORD_W-1:0] order_flat;
+    logic [VOICE_COUNT*ORD_W-1:0] order_next;
+
+    function automatic logic [ORD_W-1:0] ord_get(input integer idx);
+        ord_get = order_flat[idx*ORD_W +: ORD_W];
+    endfunction
     int target_pos, same_target_pos, free_target_pos, full_target_pos;
     logic off_found, same_note_id, free_fond;
 
@@ -56,36 +64,36 @@ module voice_manager #(
         full_target_pos = 'b0;
         if (rst_n) begin
             if (accepet_note_on) begin
+                // 注意：不使用 break/continue，保证 iverilog 与综合工具都能处理。
                 for (int i = 0; i < VOICE_COUNT; i++) begin
-                    if (occupied[order[i]] || voice_active[order[i]]) begin
-                        if (voice_note_id[order[i]] == event_note_id) begin
-                            same_note_id_target = order[i];
+                    if (occupied[ord_get(i)] || voice_active[ord_get(i)]) begin
+                        // 同音符优先重触发：只记录第一个匹配
+                        if (!same_note_id &&
+                            (voice_note_id[ord_get(i)] == event_note_id)) begin
+                            same_note_id_target = ord_get(i);
                             same_target_pos = i;
                             same_note_id = 1'b1;
-                            break;
-                        end
-                        else if (i == VOICE_COUNT-1) begin
-                            full_target = order[0];
-                            full_target_pos = 0;
-                            break;
-                        end
-                        else begin
-                            continue;
                         end
                     end
                     else begin
-                        free_target = order[i];
+                        // 保留最后一个空闲声部
+                        free_target = ord_get(i);
                         free_target_pos = i;
                         free_fond = 1'b1;
                     end
+                end
+                // 全部占用且没有同音符：抢占 order[0]
+                if (!same_note_id && !free_fond) begin
+                    full_target = ord_get(0);
+                    full_target_pos = 0;
                 end
                 target = same_note_id ? same_note_id_target : (free_fond ? free_target : full_target);
                 target_pos = same_note_id ? same_target_pos : (free_fond ? free_target_pos : full_target_pos);
             end
             else if (accepet_note_off) begin
                 for (int i = 0; i < VOICE_COUNT; i++) begin
-                    if ((occupied[order[i]] || voice_active[order[i]]) && (voice_note_id[order[i]] == event_note_id)) begin
-                        target = order[i];
+                    if ((occupied[ord_get(i)] || voice_active[ord_get(i)]) && (voice_note_id[ord_get(i)] == event_note_id)) begin
+                        target = ord_get(i);
                         off_found = 1'b1;
                     end
                 end
@@ -97,6 +105,17 @@ module voice_manager #(
     end
 
     
+    // LRU 顺序更新：把 target 移到队尾，其余元素前移
+    always_comb begin
+        order_next = order_flat;
+        for (int i = 0; i < VOICE_COUNT-1; i++) begin
+            if (i >= target_pos) begin
+                order_next[i*ORD_W +: ORD_W] = order_flat[(i+1)*ORD_W +: ORD_W];
+            end
+        end
+        order_next[(VOICE_COUNT-1)*ORD_W +: ORD_W] = target[ORD_W-1:0];
+    end
+
     always_ff @(posedge sys_clk) begin
         if (!rst_n) begin
             voice_release <= 'b0;
@@ -105,7 +124,7 @@ module voice_manager #(
             for (int i = 0; i < VOICE_COUNT; i++) begin
                 voice_note_id[i] <= 'b0;
                 voice_velocity[i] <= 'b0;
-                order[i]  <= i;
+                order_flat[i*ORD_W +: ORD_W] <= ORD_W'(i);
             end
         end
         else begin
@@ -116,10 +135,7 @@ module voice_manager #(
                 voice_start[target] <= 1'b1;
                 voice_note_id[target] <= event_note_id;
                 voice_velocity[target] <= event_velocity;
-                for (int i = target_pos; i < VOICE_COUNT-1; i++) begin
-                    order[i] <= order[i+1];
-                end
-                order[VOICE_COUNT-1] <= target;
+                order_flat <= order_next;
             end
             else if (accepet_note_off && off_found) begin
                 occupied[target] <= 1'b0;

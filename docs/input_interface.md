@@ -11,9 +11,9 @@
 `input_top` 把以下原始输入转换成成员 1 可直接使用的演奏事件和表情数据：
 
 - 4x4 按键矩阵（选根音/音区/音色）
-- 5 片压电片（触发 + 初始力度）
-- FSR402 压力传感器（持续表情）
-- ADS7830 8 位 ADC（FSR + 电位器 + 5 路压电峰值）
+- 5 片 FSR402（触发 + 力度，直接接 ADC，无前端电路）
+- 1 片 FSR402（持续表情）
+- ADS7830 8 位 ADC（2 片 FSR 用途 + 电位器 + 5 路触发）
 - 板级 `test_mode` / `test_pattern` 测试控制
 
 成员 1 只例化 `input_top`，不直接访问扫描器、ADC、滤波器内部信号。
@@ -88,28 +88,31 @@ FIFO 满时新事件不会被写入，`input_overflow` 置 1 并保持到复位�
 
 1. K0~K11 只更新 `base_note`（根音），**不产生 NOTE_ON/OFF**。
 2. K13/K15 调整八度，K14 切换波形，K12 产生 `ALL_NOTES_OFF`。
-3. 音符事件全部由 5 路压电触发产生，见 3.5。
+3. 音符事件全部由 5 路 FSR 触发产生，见 3.5。
 4. 八度/根音变化只影响之后新触发的音符；已发声音符保持原音高。
 
-### 3.5 压电触发规则
+### 3.5 FSR 触发规则
 
 ```text
-note_id = clamp(base_note + PIEZO_OFFSET[i], 0, 127)
-PIEZO_OFFSET = {0, 2, 4, 7, 9}   // 大调五声音阶
+note_id = clamp(base_note + TRIG_OFFSET[i], 0, 127)
+TRIG_OFFSET = {0, 2, 4, 7, 9}   // 大调五声音阶
 ```
 
-1. 某路峰值 >= `PIEZO_THRESH` 时产生一次 `NOTE_ON`。
-2. `velocity` 由峰值线性映射到 1~255。
-3. 触发后启动 `PIEZO_NOTE_OFF_MS` 定时，到时自动发 `NOTE_OFF`。
-4. 压电片没有可靠“松开”信号，所以 NOTE_OFF 是定时释放，不是按键释放。
-5. 触发后进入 `PIEZO_RETRIGGER_MS` 防重复窗口，窗口内同一路不会重复触发。
-6. 同一路在窗口外再次触发会重触发（更新 note_id/velocity，并重启 NOTE_OFF 定时）。
-7. `ALL_NOTES_OFF` 会清掉所有压电活跃状态和待发事件，并停止它们的 NOTE_OFF 定时。
+1. 某路 ADC 电平 >= `TRIGGER_THRESHOLD` 且该路处于 ARMED 时产生一次 `NOTE_ON`。
+2. `velocity` 由触发时的 ADC 值线性映射到 1~255，满量程由
+   `TRIGGER_VEL_FULL_SCALE` 标定（实测重击 ADC 值）。
+3. 按住期间电平持续高于 `THRESHOLD - HYST`，不会重复触发。
+4. 连续 `TRIGGER_RELEASE_SAMPLES` 个样本低于释放阈值后发 `NOTE_OFF`：
+   **真实松开才释放**，不再依赖定时器。
+5. 触发后进入 `TRIGGER_RETRIGGER_MS` 防重复窗口，窗口内同一路不会重复触发。
+6. 兜底：ACTIVE 期间若长时间没有新样本（ADC 卡死/断线），
+   `TRIGGER_NOTE_OFF_MS` 到期后强制发 `NOTE_OFF`。
+7. `ALL_NOTES_OFF` 会清掉所有触发活跃状态和待发事件。
 
-压电事件与矩阵普通事件共用 `event_queue`，仲裁优先级：
+FSR 触发事件与矩阵普通事件共用 `event_queue`，仲裁优先级：
 
 ```text
-ALL_NOTES_OFF > 压电事件 > 矩阵普通事件
+ALL_NOTES_OFF > FSR 触发 > 矩阵普通事件
 ```
 
 ---
@@ -126,7 +129,7 @@ output logic [1:0]  waveform_sel;
 | 信号 | 说明 |
 |---|---|
 | `expr_valid` | FSR 已完成至少一次有效采样 |
-| `expression` | FSR 滤波后的持续压力值 0~255 |
+| `expression` | FSR 滤波后的持续压力，映射到 `EXPR_MIN`~255（默认 96~255） |
 | `pitch_bend` | 电位器映射值 0~4095，2048 为不弯音 |
 | `waveform_sel` | 0=正弦，1=方波，2=锯齿，3=预留 |
 
@@ -147,6 +150,15 @@ pitch_bend = clamp(2048 + (pot_raw - 128) * 16, 0, 4095)
 `waveform_sel` 由 K14 循环切换：0 → 1 → 2 → 0。
 `test_mode=1` 时强制输出正弦波。
 
+`expression` 映射（松手不为 0）：
+
+```text
+expression = EXPR_MIN + (fsr_filtered × (255 - EXPR_MIN)) >> 8
+EXPR_MIN 默认 96
+```
+
+若不抬高基线，`expression=0` 会让 `adsr` 的包络乘 0，整件乐器无声。
+
 ---
 
 ## 5. 调试信号
@@ -162,9 +174,9 @@ pitch_bend = clamp(2048 + (pot_raw - 128) * 16, 0, 4095)
 | `adc_bus_error` | 1 | I2C NACK 或总线异常，保持到下一次采样 |
 | `input_overflow` | 1 | 事件 FIFO 溢出，保持到复位 |
 | `octave_debug` | 4 | 当前八度偏移（有符号，-2~+2） |
-| `piezo_peak_rst` | 5 | 5 路峰值电容放电，接 2N7002 栅极 |
-| `piezo_hit_debug` | 5 | 5 路峰值是否超过阈值 |
-| `piezo_active_debug` | 5 | 5 路是否正在发声 |
+| `piezo_peak_rst` | 5 | 旧压电方案遗留，当前恒为 0 |
+| `piezo_hit_debug` | 5 | 5 路 FSR 电平是否超过阈值 |
+| `piezo_active_debug` | 5 | 5 路 FSR 是否正在发声 |
 | `base_note_debug` | 7 | 当前根音（含八度） |
 
 调试信号可以接 LED、逻辑分析仪或仿真波形，不影响事件握手。
@@ -188,11 +200,15 @@ pitch_bend = clamp(2048 + (pot_raw - 128) * 16, 0, 4095)
 | `SAMPLE_INTERVAL` | 540 | 20 us 间隔，7 通道轮询 |
 | `FSR_CHANNEL` | 0 | ADS7830 CH0 |
 | `POT_CHANNEL` | 1 | ADS7830 CH1 |
-| `PIEZO_BASE_CH` | 2 | 压电 P0 所在通道，P0~P4 = CH2~CH6 |
-| `PIEZO_THRESH` | 20 | 压电触发阈值 |
-| `PIEZO_OFF_MS` | 500 | 自动 NOTE_OFF 时间 |
-| `PIEZO_RETRIG_MS` | 50 | 防重复触发窗口 |
-| `MATRIX_MODE` | 0 | 0=矩阵键盘 1=矩阵配置+压电触发 |
+| `EXPR_MIN` | 96 | 表情最小值：松手时的基线音量，避免整件乐器无声 |
+| `TRIG_BASE_CH` | 2 | 触发 P0 所在通道，P0~P4 = CH2~CH6 |
+| `TRIG_THRESH` | 20 | 触发阈值（ADC 码） |
+| `TRIG_HYST` | 4 | 释放回差 |
+| `TRIG_REL_SAMP` | 3 | 连续几个样本低于释放阈值判定松开 |
+| `TRIG_OFF_MS` | 2000 | 无样本时的兜底 NOTE_OFF |
+| `TRIG_RETRIG_MS` | 20 | 防重复触发窗口 |
+| `TRIG_VEL_FULL` | 200 | 力度满量程 ADC 值 |
+| `MATRIX_MODE` | 0 | 0=矩阵键盘，1=矩阵配置 + FSR 触发 |
 | `EVENT_FIFO_DEPTH` | 8 | 事件 FIFO 深度 |
 | `BASE_NOTE` | 60 | K0 对应 C4 |
 
@@ -207,8 +223,8 @@ pitch_bend = clamp(2048 + (pot_raw - 128) * 16, 0, 4095)
 | 矩阵扫描（4 行 x 125 us） | 0.5 ms |
 | 消抖（按下确认） | 2 ms |
 | 事件译码/FIFO | < 0.1 us |
-| 7 通道 ADC 一轮扫描（压电优先） | ≈0.84 ms |
-| 压电触发到 NOTE_ON（峰值保持后） | ≈1 ms |
+| 7 通道 ADC 一轮扫描（触发优先） | ≈0.84 ms |
+| FSR 触发到 NOTE_ON（含释放判定） | ≈1 ms |
 | FSR 采样与滤波（持续表情） | ≈1 ms |
 | **输入侧合计（按键路径）** | **≈3 ms** |
 
@@ -224,9 +240,9 @@ input logic       test_mode;
 input logic [1:0] test_pattern;
 ```
 
-- `test_mode=1`：事件源切换为 `input_event_stub`，真实按键和压电事件被排空丢弃；
-  ADS7830/FSR/压电采样仍在运行，但不会送到成员 1。
-- `test_mode=0`：事件源为真实矩阵/压电 + FSR。
+- `test_mode=1`：事件源切换为 `input_event_stub`，真实按键和 FSR 触发事件被排空丢弃；
+  ADS7830/FSR 采样仍在运行，但不会送到成员 1。
+- `test_mode=0`：事件源为真实矩阵 + FSR 触发。
 - 切换 `test_pattern` 会让测试序列从 0 ms 重新开始。
 
 | `test_pattern` | 序列 |
@@ -248,7 +264,7 @@ input logic [1:0] test_pattern;
 | `key_event_decoder` | 边沿 → 事件，八度/波形状态，ALL_OFF 优先 |
 | `event_queue` | valid/ready FIFO，背压缓存 |
 | `adc_ads7830` | I2C 单次转换读取 |
-| `piezo_peak` | 5 路峰值/阈值/力度/自动 NOTE_OFF/放电 |
+| `fsr_trigger` | 5 路阈值/迟滞/力度/电平释放/兜底 NOTE_OFF |
 | `fsr_filter` | 指数滤波、迟滞门限、力度映射 |
 | `expression_mapper` | 电位器滤波、pitch_bend 映射、波形选择 |
 | `input_event_stub` | 固定演示事件源 |

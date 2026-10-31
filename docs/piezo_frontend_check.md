@@ -1,6 +1,11 @@
 # 压电单通道前端板上电与联调检查
 
-版本：v1.0  
+> ⚠️ **已废弃（2026-10-29）**
+> 触发源已改为 5 路 FSR402：一端接 3.3 V、另一端直接接 ADS7830，每路 1 个 10 kΩ 到 GND，
+> **不再需要钳位、峰值保持和 MOS 放电电路**。本文仅作历史记录，请勿按此接线。
+> 当前方案见 `docs/hardware_list.md` 第 4 节和 `docs/input_pin_requirements.md` 第 3.4 节。
+
+版本：v1.0（已废弃）  
 对应文件：`hardware/piezo_frontend/netlist.csv`  
 目标：先验证 1 路压电的钳位、峰值保持、MOS 放电和 ADC 读数。
 

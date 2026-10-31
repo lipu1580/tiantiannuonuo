@@ -3,6 +3,10 @@
 // 归属   : 成员 2（交互输入与演奏事件模块）
 // 功能   : 5 路压电片峰值触发、力度映射、自动 NOTE_OFF、峰值电容放电。
 //
+// 【已弃用】
+//   2026-10 起触发源改为 5 路 FSR（fsr_trigger.sv），本模块不再被 input_top
+//   例化，仅保留作历史参考与参数兼容。新设计请勿使用。
+//
 // 【它在系统中的位置】
 //
 //   压电片 -> 保护/峰值保持(硬件) -> ADS7830 CH2~CH6
@@ -63,8 +67,8 @@ module piezo_peak #(
     parameter integer NUM_PIEZO         = 5,
     parameter integer SYS_CLK_HZ       = project_params_pkg::SYS_CLK_HZ,           // 27 MHz
     parameter logic [7:0] THRESHOLD    = project_params_pkg::PIEZO_THRESHOLD,      // 触发阈值
-    parameter integer NOTE_OFF_MS      = project_params_pkg::PIEZO_NOTE_OFF_MS,    // 自动 NOTE_OFF 时间
-    parameter integer RETRIGGER_MS     = project_params_pkg::PIEZO_RETRIGGER_MS,   // 防重复触发窗口
+    parameter integer NOTE_OFF_MS      = project_params_pkg::PIEZO_NOTE_OFF_MS,    // 自动 NOTE_OFF 时间，500ms
+    parameter integer RETRIGGER_MS     = project_params_pkg::PIEZO_RETRIGGER_MS,   // 防重复触发窗口，50ms
     parameter integer PEAK_RST_CYCLES  = project_params_pkg::PIEZO_PEAK_RST_CYCLES,// 峰值电容放电脉冲
     parameter integer NOTE_W           = 7
 )(
@@ -77,7 +81,7 @@ module piezo_peak #(
     input  logic                    sample_valid,      // 单周期有效
     input  logic [2:0]              sample_channel,    // 本次样点通道
     input  logic [7:0]              sample_data,       // 8 位 ADC 值
-    input  logic [2:0]              piezo_ch_base,     // P0 所在通道（默认 CH2）
+    input  logic [2:0]              piezo_ch_base,     // P0 所在通道（默认 CH2），告诉本模块压电从哪个通道开始
 
     //-------------------------------------------------------------------------
     // 当前根音（已包含八度），来自 key_event_decoder
@@ -97,11 +101,11 @@ module piezo_peak #(
     //-------------------------------------------------------------------------
     // 事件请求（接 input_top 的事件仲裁器）
     //-------------------------------------------------------------------------
-    output logic                    event_req_valid,
-    input  logic                    event_req_ready,
-    output logic [1:0]              event_req_type,
-    output logic [NOTE_W-1:0]       event_req_note,
-    output logic [7:0]              event_req_velocity,
+    output logic                    event_req_valid,    //我这里有事件要写
+    input  logic                    event_req_ready,    //你告诉我你此刻能不能接收
+    output logic [1:0]              event_req_type,     //什么类型的事件？
+    output logic [NOTE_W-1:0]       event_req_note,     //音符号
+    output logic [7:0]              event_req_velocity, //速度
 
     //-------------------------------------------------------------------------
     // 调试
@@ -113,10 +117,10 @@ module piezo_peak #(
     //-------------------------------------------------------------------------
     // 时间参数换算
     //-------------------------------------------------------------------------
-    localparam integer NOTE_OFF_CYCLES = (SYS_CLK_HZ / 1000) * NOTE_OFF_MS;
-    localparam integer RETRIG_CYCLES   = (SYS_CLK_HZ / 1000) * RETRIGGER_MS;
-    localparam integer OFF_W = (NOTE_OFF_CYCLES <= 1) ? 1 : $clog2(NOTE_OFF_CYCLES + 1);
-    localparam integer RT_W  = (RETRIG_CYCLES   <= 1) ? 1 : $clog2(RETRIG_CYCLES   + 1);
+    localparam integer NOTE_OFF_CYCLES = (SYS_CLK_HZ / 1000) * NOTE_OFF_MS;     //500ms内的周期数
+    localparam integer RETRIG_CYCLES   = (SYS_CLK_HZ / 1000) * RETRIGGER_MS;    //50ms内的周期数
+    localparam integer OFF_W = (NOTE_OFF_CYCLES <= 1) ? 1 : $clog2(NOTE_OFF_CYCLES + 1);    //其实看到这种就应该想
+    localparam integer RT_W  = (RETRIG_CYCLES   <= 1) ? 1 : $clog2(RETRIG_CYCLES   + 1);    //啊需要多少位宽来存放这个周期数呢
     localparam integer RST_W = (PEAK_RST_CYCLES <= 1) ? 1 : $clog2(PEAK_RST_CYCLES + 1);
     localparam integer IDX_W = (NUM_PIEZO     <= 1) ? 1 : $clog2(NUM_PIEZO + 1);
 
@@ -125,7 +129,7 @@ module piezo_peak #(
     //-------------------------------------------------------------------------
     logic [NUM_PIEZO-1:0] armed;       // 1=可以触发
     logic [NUM_PIEZO-1:0] active_q;    // 1=该路正在发声
-
+    //下面6个内部信号都生成了5个，也就是NUM_PIEZO，即每个压电片独立拥有
     logic [NOTE_W-1:0] note_latched [NUM_PIEZO]; // 触发时锁存的音符
     logic [OFF_W-1:0]  off_timer    [NUM_PIEZO]; // NOTE_OFF 倒计时
     logic [RT_W-1:0]   retrig_timer [NUM_PIEZO]; // 防重复触发倒计时
@@ -143,12 +147,12 @@ module piezo_peak #(
     logic [IDX_W-1:0]       sel;   // 0=无事件，1..NUM_PIEZO=对应通道
 
     //-------------------------------------------------------------------------
-    // 音符映射函数：大调五声音阶
+    // 音符映射函数：大调五声音阶，这个函数接收第几个压电片和根音，返回出MIDI
     //   P0 +0, P1 +2, P2 +4, P3 +7, P4 +9
     //-------------------------------------------------------------------------
     function automatic logic [NOTE_W-1:0] calc_note(
-        input integer              idx,
-        input logic [NOTE_W-1:0]   base
+        input integer              idx,		//第几个压电片？
+        input logic [NOTE_W-1:0]   base		//根音
     );
         integer n;
         begin
@@ -161,7 +165,7 @@ module piezo_peak #(
             endcase
 
             if (n < 0) begin
-                calc_note = '0;
+                calc_note = '0;		//sv的写法，直接将返回值写进函数名，作为以恶搞隐式声明的变量
             end else if (n > 127) begin
                 calc_note = 7'd127;
             end else begin
@@ -281,7 +285,7 @@ module piezo_peak #(
                 end
 
                 // 峰值放电定时器
-                if (rst_timer[i] != '0) begin
+                if (rst_timer[i] != '0) begin   
                     rst_timer[i] <= rst_timer[i] - 1'b1;
                 end
             end
@@ -293,10 +297,10 @@ module piezo_peak #(
             if (sample_valid) begin
                 for (int i = 0; i < NUM_PIEZO; i++) begin
                     if (sample_channel == 3'(piezo_ch_base + 3'(i))) begin
-                        peak_q[i] <= sample_data;
+                        peak_q[i] <= sample_data;   
 
                         // 读完峰值后给保持电容放电，为下一次触发做准备
-                        rst_timer[i] <= RST_W'(PEAK_RST_CYCLES);
+                        rst_timer[i] <= RST_W'(PEAK_RST_CYCLES);	//和retrig_timer原理一样
 
                         if (armed[i] && (sample_data >= THRESHOLD)) begin
                             // 触发：锁存音符/力度，启动 NOTE_OFF 和防重复定时

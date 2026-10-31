@@ -1,6 +1,6 @@
 # 成员 2 测试记录
 
-日期：2026-10-20  
+日期：2026-10-29（2026-10-20 首版；2026-10-29 触发源改为 FSR）  
 工具链：
 - Icarus Verilog 12.0
 - Verilator 5.020
@@ -26,11 +26,12 @@ Makefile 中豁免）。
 | `tb_key_debounce` | 抖动抑制、单次按下/释放、长按不重复、多键独立 | PASS | `build/tb_key_debounce.log` |
 | `tb_adc_ads7830` | I2C START/地址/命令/Repeated START/读数据 | PASS | `build/tb_adc_ads7830.log` |
 | `tb_fsr_filter` | 滤波、噪声门限、轻/中/重按映射、通道隔离 | PASS | `build/tb_fsr_filter.log` |
+| `tb_expression_mapper` | 中心死区、线性映射、两端限幅、waveform_sel | PASS | `build/tb_expression_mapper.log` |
 | `tb_event_queue` | 顺序、背压稳定、溢出标志、满时同拍读写 | PASS | `build/tb_event_queue.log` |
-| `tb_piezo_peak` | 5 路峰值/力度/自动 NOTE_OFF/防重复/ALL_OFF/放电 | PASS | `build/tb_piezo_peak.log` |
+| `tb_fsr_trigger` | 5 路阈值/力度/保持/电平释放/防重复/兜底 NOTE_OFF/ALL_OFF | PASS | `build/tb_fsr_trigger.log` |
 | `tb_matrix_config` | MATRIX_MODE=1：选根音/八度/波形/ALL_OFF，不产生 NOTE_ON | PASS | `build/tb_matrix_config.log` |
 | `tb_input_event_stub` | 演示序列、背压、pattern 切换 | PASS | `build/tb_input_event_stub.log` |
-| `tb_input_top` | 系统级：7 通道 ADC、矩阵、FSR、电位器、压电触发 | PASS | `build/tb_input_top.log` |
+| `tb_input_top` | 系统级：7 通道 ADC、矩阵、FSR 表情、电位器、FSR 触发 | PASS | `build/tb_input_top.log` |
 
 ---
 
@@ -59,19 +60,20 @@ Makefile 中豁免）。
 - FSR=64 时，`fsr_filtered=64`，`event_velocity=60`。
 - POT=192 时，`pitch_bend=3072`，证明 CH1 确实被采样。
 - 非 FSR 通道样本不会污染 FSR 滤波状态。
-- 7 通道轮询：CH2~CH6 压电、CH0 FSR、CH1 POT，一轮约 0.84 ms（默认参数）。
+- 7 通道轮询：CH2~CH6 FSR 触发、CH0 FSR 表情、CH1 POT，一轮约 0.84 ms（默认参数）。
 
-### 2.4 压电 / 矩阵配置
+### 2.4 FSR 触发 / 矩阵配置
 
 - P0~P4 分别映射到 base_note + 0/+2/+4/+7/+9。
-- 峰值 100/150/200/80 分别映射到 velocity 86/141/195/65（阈值 20）。
-- 触发后自动 NOTE_OFF，时间可参数化。
-- 防重复窗口内第二次击打被忽略；窗口外可重触发。
-- ALL_NOTES_OFF 清除活跃压电状态，不再产生后续 NOTE_OFF。
-- `peak_rst[4:0]` 每路都能产生放电脉冲。
+- 电平 150 映射到 velocity 184（阈值 20、满量程 200）；电平 200 映射到 255。
+- 按住不放不会重复触发。
+- 连续 3 个样本低于“阈值−回差”后才产生 `NOTE_OFF`。
+- 防重复窗口（20 ms）内第二次按压被忽略；窗口外可重触发。
+- 2 s 无新样本时兜底 `NOTE_OFF`。
+- ALL_NOTES_OFF 清除活跃状态，后续松手不再产生 `NOTE_OFF`。
 - `MATRIX_MODE=1` 时 K0~K11 只改变 `base_note`，不产生 NOTE_ON。
 
-### 2.4 八度与波形
+### 2.5 八度与波形
 
 - K13 升八度后 K0 发出 MIDI 72。
 - K15 降两次后 K0 发出 MIDI 48。

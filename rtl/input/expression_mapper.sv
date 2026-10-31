@@ -25,9 +25,10 @@
 import audio_defs_pkg::WAVE_SINE;
 
 module expression_mapper #(
-    parameter integer FILTER_SHIFT = 2,   // 滤波 alpha = 1/4
-    parameter integer CENTER_RAW   = 128, // 电位器中点 ADC 值
-    parameter integer BEND_SPAN    = 16   // 每 1 LSB 对应的 pitch 步进
+    parameter integer FILTER_SHIFT   = 2,   // 滤波 alpha = 1/4
+    parameter integer CENTER_RAW     = 128, // 电位器中点 ADC 值
+    parameter integer BEND_SPAN      = 16,  // 每 1 LSB 对应的 pitch 步进
+    parameter integer CENTER_DEADZONE = 2   // 中心死区（±LSB，抑制静止抖动）
 )(
     input  logic        sys_clk,
     input  logic        rst_n,
@@ -77,8 +78,16 @@ module expression_mapper #(
             pot_next = 8'(filt_full);     // 已限幅到 0~255
         end
 
-        // 电位器 -> pitch_bend：中心 2048，两端 0/4095
-        calc_c = 2048 + (int'(pot_next) - CENTER_RAW) * BEND_SPAN;
+        // 电位器 -> pitch_bend：中点 2048，两端 0/4095。
+        // 中心死区：|pot - CENTER| <= DEADZONE 时不弯音，抑制静止抖动（F-06）。
+        if ((int'(pot_next) - CENTER_RAW) > CENTER_DEADZONE) begin
+            calc_c = 2048 + (int'(pot_next) - CENTER_RAW) * BEND_SPAN;
+        end else if ((CENTER_RAW - int'(pot_next)) > CENTER_DEADZONE) begin
+            calc_c = 2048 - (CENTER_RAW - int'(pot_next)) * BEND_SPAN;
+        end else begin
+            calc_c = 2048;
+        end
+
         if (calc_c < 0) begin
             bend_next = 12'd0;
         end else if (calc_c > 4095) begin

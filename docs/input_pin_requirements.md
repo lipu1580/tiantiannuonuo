@@ -53,9 +53,9 @@ assign adc_sda_i  = adc_sda;
 | `input_state[3:0]` | 调试 | `{test_mode, pressure_valid, adc_busy, event_valid}` |
 | `adc_bus_error` | 调试 | I2C 错误指示 |
 | `input_overflow` | 调试 | 事件 FIFO 溢出 |
-| `piezo_peak_rst[4:0]` | FPGA → 压电调理 | 5 路峰值电容放电，接 2N7002 栅极（高有效） |
-| `piezo_hit_debug[4:0]` | 调试 | 5 路峰值是否超过阈值 |
-| `piezo_active_debug[4:0]` | 调试 | 5 路是否正在发声 |
+| `piezo_peak_rst[4:0]` | 保留 | 旧压电方案遗留，当前恒为 0，可不连接 |
+| `piezo_hit_debug[4:0]` | 调试 | 5 路 FSR 电平是否超过阈值 |
+| `piezo_active_debug[4:0]` | 调试 | 5 路 FSR 是否正在发声 |
 | `base_note_debug[6:0]` | 调试 | 当前根音（含八度） |
 
 ---
@@ -118,53 +118,43 @@ key_row[3] ──┴── K12 ─────── K13 ─────── K
 
 | 通道 | 用途 | 建议 |
 |---|---|---|
-| CH0 | FSR402 | `FSR_ADC_CHANNEL=0` |
+| CH0 | FSR402（持续表情） | `FSR_ADC_CHANNEL=0` |
 | CH1 | 电位器 | `POT_ADC_CHANNEL=1` |
-| CH2~CH6 | 5 路压电峰值 | 每路独立峰值保持 + 复位 |
+| CH2~CH6 | 5 路 FSR 触发 | 每路 1 个 10 kΩ 分压即可 |
 | CH7 | 备用 | 可扩展第二 FSR、滑音条等 |
 
-> 该映射与当前 `project_params.svh` 和 testbench 一致。若改用
-> `docs/device_Info_path.md` 的“CH0~CH4 压电”方案，必须同步修改 RTL 常量和
-> 采样调度，详见 `docs/hardware_list.md` 第 6 节。
+> 该映射与 `project_params.svh` 中的 `TRIGGER_ADC_CHANNEL_BASE=2` 一致。
+> 触发通道与表情通道的接法相同：都是一端接 3.3 V、另一端接 ADC，
+> 并加一个 10 kΩ 到 GND。
 
 ### 3.3 采样节奏
 
-- 7 通道轮询：`CH2 CH3 CH4 CH5 CH6`（压电）→ `CH0`（FSR）→ `CH1`（电位器）。
+- 7 通道轮询：`CH2 CH3 CH4 CH5 CH6`（FSR 触发）→ `CH0`（FSR 表情）→ `CH1`（电位器）。
 - 单次 I2C 事务约 100 us（400 kHz）。
 - 每次事务完成后等待 `SAMPLE_INTERVAL`（默认 20 us）再采样下一个通道。
-- 一轮扫描约 0.84 ms，即每个通道约 1.2 kHz；压电峰值保持电路保证不会
-  漏掉短脉冲。
-- 压电通道排在最前，以保证触发延迟最低；FSR/电位器变化慢，放在后面。
+- 一轮扫描约 0.84 ms，即每个通道约 1.2 kHz。FSR 电压是持续量，
+  不依赖峰值保持，1.2 kHz 的采样率对按压动作完全够用。
+- 触发通道排在最前，以保证触发延迟最低；表情/电位器变化慢，放在后面。
 
-### 3.4 压电输入（5 路）
+### 3.4 FSR 触发输入（5 路）
 
-压电片受迫时可能输出 ±几十伏的短脉冲，**不能直接接 ADS7830 或 FPGA**。
-每路必须加：
-
-```text
-压电片 → 1kΩ 串联 → BAT54S 钳位到 0/3.3V → 3.3V TVS/Zener
-       → 1nF 到地 → BAT85 峰值检波 → 100nF 保持 → 100Ω → ADS7830 CHx
-```
-
-另外，5 路峰值保持电容的放电端（2N7002 漏极）需要 5 根 FPGA GPIO：
+FSR402 是两端可变电阻，本身不产生电压，因此每路只需要一个分压电阻：
 
 ```text
-FPGA piezo_peak_rst[4:0] ── 100Ω ── 2N7002 栅极
-                                     源极 ── GND
-                                     漏极 ── 100nF 峰值电容
-                                     栅极 ── 100kΩ ── GND
+3.3V ── FSR402 ──┬── ADS7830 CHx（CH2~CH6）
+                 │
+                10kΩ
+                 │
+                GND
 ```
 
-`piezo_peak_rst` 高有效：FPGA 读完峰值后拉高一段（默认 50 us），
-把 100 nF 放电，为下一次触发做准备。
+- **不需要**钳位二极管、峰值保持电容、BAT85、2N7002 或运放。
+- 无压力时 FSR 阻值 >1 MΩ，通道电压接近 0（ADC < 10）。
+- 压力增大时阻值下降到 1~3 kΩ，通道电压升到 2.5~3.0 V（ADC 190~240）。
+- 在通道与 GND 之间并联 100 nF 可抑制引线噪声（可选）。
+- 若实际“不按时接近 3.3 V”，说明缺少到地的 10 kΩ 分压电阻，必须补上。
 
-具体要求见 `docs/hardware_list.md` 第 4 节。关键点：
-
-- 压电片两端并 1 MΩ 泄放；
-- 钳位必须在连接器/面包板入口处；
-- 5 路峰值保持电容互相独立；
-- 峰值电容由 FPGA GPIO 控制 2N7002 放电后再进行下一次触发；
-- 不要用电感去“中和”压电尖峰，电感会与压电片电容谐振。
+> 5 路使用各自的 10 kΩ，不要共用一个电阻：共用会把 5 路信号短接。
 
 ---
 
@@ -243,10 +233,9 @@ ADC 原始值
 4. 所有输入引脚分配在同一 bank，避免跨 bank 电平不匹配。
 5. 调试信号若引脚不足，可只保留 `key_down[3:0]`、`adc_bus_error`、
    `input_overflow`。
-6. 压电片信号进入 FPGA/ADC 前必须先经过限流+钳位，见
-   `docs/hardware_list.md` 第 4 节。
-7. `piezo_peak_rst[4:0]` 需要 5 根 GPIO，接到 5 路 2N7002 栅极；
-   若引脚不足，可优先保证 5 路全部保留，或把调试信号减少。
+6. 5 路 FSR 触发只占用 ADC 的 CH2~CH6，不需要额外 GPIO。
+7. `piezo_peak_rst[4:0]` 为旧方案遗留端口，当前恒为 0，可以不分配引脚；
+   若 `.cst` 已存在，保留也无副作用。
 
 ---
 
@@ -257,6 +246,8 @@ ADC 原始值
 - [ ] SCL/SDA 引脚已分配，SDA 为双向
 - [ ] SDA 4.7k 上拉到 3.3 V
 - [ ] ADS7830 地址确认为 0x48
-- [ ] CH0 接 FSR 分压，CH1 接电位器
+- [ ] CH0 接 FSR 表情分压，CH1 接电位器
+- [ ] CH2~CH6 各接 1 片 FSR 触发，每路 1 个 10 kΩ 到 GND
+- [ ] 不按任何 FSR 时，7 个通道电压都接近 0 V（确认分压存在）
 - [ ] `test_mode`、`test_pattern[1:0]` 有拨码或按键
 - [ ] `adc_bus_error`、`input_overflow` 可观测

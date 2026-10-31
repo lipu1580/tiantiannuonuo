@@ -1,18 +1,8 @@
-//=============================================================================
-// 文件   : key_event_decoder.sv
-// 功能   : 将消抖后的按键边沿翻译成标准演奏事件，并维护八度/波形状态。
-//
-// 【输入】
-//   key_pressed / key_released : key_debounce 输出的单周期边沿
-//   key_down                   : 当前稳定按下状态（用于 ALL_OFF 抑制）
-//   velocity_in                : 当前 FSR 力度（按下瞬间锁存）
-//
-// 【内部结构：两阶段】
-//
-//   阶段 1：事件生成（always_ff）
-//     把每个按键边沿写进“每键一个槽位”的 pending 表。
-//     同一拍多个键按下也不会互相覆盖，因为每个键有自己的槽位。	16个pending槽位
-//
+//这个模块接受进来的是消抖模块处理过后的，从键盘输出出来的按键状态，以及FSR吧。这个模块要做的事就是把这个按键状态，转化为事件信息输出传出去，除了事件信息，还要传出去八度偏移值，当前根音。
+//这件事情具体是怎么完成的呢？
+//本模块内部有11个内部信号，在100行附近，其中有5个是键盘的逻辑分区的掩码，每个掩码都是16位但只有自己的逻辑分区那几位为1。
+//紧接着我们引入了映射表note_map，并批量地将将0-15这16个按键都创建了各自的note_map，note_map是干什么的呢，它就是一个映射表，你告诉我你是第几个按键，我告诉你你这个物理位置上的按键在逻辑功能上是谁。在父模块中用上面说的内部信号中的另外6个来接收note_map映射后的结果，再传给mask，这时候，mask变得可用。
+
 //   阶段 2：事件选择（always_comb）
 //     每拍从 pending 表里选一个事件送到 event_queue。
 //     优先级：ALL_NOTES_OFF > 最小键号。
@@ -64,14 +54,14 @@ module key_event_decoder #(
     input  logic                    rst_n,
 
     // 按键边沿（单周期脉冲）与稳定状态
-    input  logic [KEY_COUNT-1:0]    key_pressed,		//16位宽，是从上一个模块出来的确定按下信号
+    input  logic [KEY_COUNT-1:0]    key_pressed,		//16位宽，是从上一个消抖模块出来的确定按下信号
     input  logic [KEY_COUNT-1:0]    key_released,
     input  logic [KEY_COUNT-1:0]    key_down,
     // 当前 FSR 力度，NOTE_ON 时锁存
     input  logic [7:0]              velocity_in,		//速度为8位，在最后的拼接打包数据的低八位
 
     // 事件请求（接 event_queue 写端口）
-    output logic                    event_req_valid,	//我这里有时间要写
+    output logic                    event_req_valid,	//我这里有事件要写
     input  logic                    event_req_ready,	//你那边队列能不能接收？准备好了没有？
     output logic [1:0]              event_req_type,		//事件类型
     output logic [6:0]              event_req_note,		//MIDI音高编号
@@ -111,23 +101,24 @@ module key_event_decoder #(
     logic [KEY_COUNT-1:0] oct_down_mask;   // 哪些键是降八度
 
     genvar g;
-    generate
-        for (g = 0; g < KEY_COUNT; g++) begin : g_note_map	//g_note_map是这组生成块的名字
-            note_map #(
+    generate		//不是循环执行而是批量硬件生成
+        for (g = 0; g < KEY_COUNT; g++) begin : g_note_map	//g_note_map是这一整组生成块的名字
+							//展开后会有g_note_map[0], g_note_map[1]...
+            note_map #(		//模块，note_map是一个别处的模块
                 .NOTE_KEY_COUNT (NOTE_KEY_COUNT),
                 .BASE_NOTE      (BASE_NOTE)
-            ) u_note_map (
-                .key_index        (4'(g)),
+            ) u_note_map (	//这个是note_map的例化，将当前的g的note_map为模板例化，这个g是在g_note_map这一层被循环生成的
+                .key_index        (4'(g)),	//父模块输入子模块
                 .octave_offset    (octave_offset),
-                .is_note_key      (map_is_note[g]),
+                .is_note_key      (map_is_note[g]),	//子模块输出给父模块
                 .is_all_notes_off (map_all_off[g]),
                 .is_waveform_key  (map_wave[g]),
                 .is_octave_up     (map_oct_up[g]),
                 .is_octave_down   (map_oct_down[g]),
                 .note_id          (map_note[g])
             );
-
-            assign note_key_mask[g] = map_is_note[g];
+			//从这里开始，note_map的例化就结束了，每次例化结束，下面这些
+            assign note_key_mask[g] = map_is_note[g];	//父模块中的信号。从子模块的输出拿到信息，再给到父模块的mask
             assign all_off_mask[g]  = map_all_off[g];
             assign wave_mask[g]     = map_wave[g];
             assign oct_up_mask[g]   = map_oct_up[g];
@@ -170,7 +161,7 @@ module key_event_decoder #(
     logic press_oct_up;
     logic press_oct_down;
 
-    assign press_all_off  = |(key_pressed & all_off_mask);
+    assign press_all_off  = |(key_pressed & all_off_mask);//按的就是这个键&这个键的掩码=有一个1=塌缩为1
     assign press_wave     = |(key_pressed & wave_mask);
     assign press_oct_up   = |(key_pressed & oct_up_mask);
     assign press_oct_down = |(key_pressed & oct_down_mask);
@@ -247,6 +238,7 @@ module key_event_decoder #(
             //-----------------------------------------------------------------
             // 3) 八度 / 波形 / ALL_NOTES_OFF
             //-----------------------------------------------------------------
+			//  想升             并且还能升
             if (press_oct_up && octave_offset < 4'sd2) begin
                 octave_offset <= octave_offset + 4'sd1;   // 上限 +2
             end

@@ -29,7 +29,7 @@ module voice #(
     output logic                         active, // 声部仍处于发声/释放状态
     output logic [15:0]                  envelope_value // 当前包络电平
 );
-    logic signed [15:0] waveform_sample;
+    logic signed [PHASE_W-1:0] waveform_sample;
     logic [PHASE_W-1:0] phase_increment;
     logic [NOTE_W-1:0] lock_note_id;
 

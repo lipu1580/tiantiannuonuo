@@ -79,6 +79,7 @@ package project_params_pkg;
     //----------------------------------------------------------------------
     parameter integer FSR_FILTER_SHIFT = 2;       // 指数滤波 alpha = 1/4
     parameter logic [7:0] FSR_NOISE_GATE = 8'd6;  // FSR 噪声门限
+    parameter logic [7:0] EXPR_MIN = 8'd96;       // 表情最小值：松手时的基线音量
     parameter logic [6:0] NOTE_BASE_C4 = 7'd60;   // 默认起始音符 C4
     parameter integer EVENT_FIFO_DEPTH = 8;       // 输入事件 FIFO 深度
 endpackage

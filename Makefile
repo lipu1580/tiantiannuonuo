@@ -31,6 +31,7 @@ TBS := \
 	tb_key_debounce \
 	tb_adc_ads7830 \
 	tb_fsr_filter \
+	tb_expression_mapper \
 	tb_event_queue \
 	tb_fsr_trigger \
 	tb_matrix_config \

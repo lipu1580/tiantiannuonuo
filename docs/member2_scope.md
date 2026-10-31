@@ -166,7 +166,7 @@ note_id = clamp(base_note + TRIG_OFFSET[fsr_index], 0, 127)
 
 ### 5.4 表情
 
-- FSR 滤波值 -> `expression`，建议映射到 `EXPR_MIN~255`（例如 64~255），
+- FSR 滤波值 -> `expression`，已实现 `EXPR_MIN`(默认 96)~255 映射，
   避免松开 FSR 后整件乐器完全无声。
 - 一个 FSR 是全局表情，作用于所有正在发声的声部。
 

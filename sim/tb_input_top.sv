@@ -214,6 +214,7 @@ module tb_input_top;
     //-------------------------------------------------------------------------
     initial begin
         int base;
+        int exp_expr;
 
         pressed = '0;
         u_model.adc_val[0] = 8'h40;   // FSR   = 64
@@ -471,7 +472,47 @@ module tb_input_top;
         check_event(base + 1, 2'b10, 7'd60, "trig P0 NOTE_OFF C4");
 
         //---------------------------------------------------------------------
-        // 10) 最终检查
+        // 10) 背压协议（F-17）
+        //    FIFO 满时，事件只能停在译码器/skid 里等待，
+        //    不能向 event_queue 发出 "valid=1 && ready=0"（会被误判为 overflow）。
+        //---------------------------------------------------------------------
+        event_ready = 1'b0;
+        repeat (5) @(posedge clk);
+
+        // 4 个键 × (ON + OFF) = 8 个事件，刚好填满 FIFO
+        for (int k = 0; k < 4; k++) begin
+            tap_key(k);
+        end
+
+        // 再按第 5 个键：事件只能在等待，不能误报溢出
+        base = ev_count;
+        press_key(4);
+        repeat (300) @(posedge clk);
+
+        if (input_overflow !== 1'b0) begin
+            $display("FAIL: false overflow while FIFO full (F-17)");
+            errors++;
+        end else begin
+            $display("PASS: no false overflow under FIFO backpressure");
+        end
+
+        // 顶层所见事件仍应是 FIFO 队首，字段稳定
+        if (!event_valid) begin
+            $display("FAIL: FIFO should still present its head event");
+            errors++;
+        end
+
+        event_ready = 1'b1;                  // 释放背压
+        release_key(4);
+        repeat (2500) @(posedge clk);        // 排空全部事件
+
+        if (input_overflow !== 1'b0) begin
+            $display("FAIL: overflow after draining (%0d events)", ev_count);
+            errors++;
+        end
+
+        //---------------------------------------------------------------------
+        // 11) 最终检查
         //---------------------------------------------------------------------
         if (input_overflow !== 1'b0) begin
             $display("FAIL: input_overflow asserted");
@@ -490,6 +531,21 @@ module tb_input_top;
         if (expr_valid !== 1'b1) begin
             $display("FAIL: expr_valid should be 1 after ADC sampling");
             errors++;
+        end
+
+        // expression 映射：应抬升到 EXPR_MIN..255，松手不能为 0
+        exp_expr = 96 + ((int'(fsr_filtered) * 159) >> 8);
+        if (int'(expression) < 96) begin
+            $display("FAIL: expression=%0d below EXPR_MIN=96", expression);
+            errors++;
+        end else if (int'(expression) < exp_expr - 2 ||
+                     int'(expression) > exp_expr + 2) begin
+            $display("FAIL: expression=%0d, expected ~%0d (fsr_filtered=%0d)",
+                     expression, exp_expr, fsr_filtered);
+            errors++;
+        end else begin
+            $display("PASS: expression=%0d (fsr_filtered=%0d)",
+                     expression, fsr_filtered);
         end
 
         if (errors == 0) begin

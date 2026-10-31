@@ -129,7 +129,7 @@ output logic [1:0]  waveform_sel;
 | 信号 | 说明 |
 |---|---|
 | `expr_valid` | FSR 已完成至少一次有效采样 |
-| `expression` | FSR 滤波后的持续压力值 0~255 |
+| `expression` | FSR 滤波后的持续压力，映射到 `EXPR_MIN`~255（默认 96~255） |
 | `pitch_bend` | 电位器映射值 0~4095，2048 为不弯音 |
 | `waveform_sel` | 0=正弦，1=方波，2=锯齿，3=预留 |
 
@@ -149,6 +149,15 @@ pitch_bend = clamp(2048 + (pot_raw - 128) * 16, 0, 4095)
 
 `waveform_sel` 由 K14 循环切换：0 → 1 → 2 → 0。
 `test_mode=1` 时强制输出正弦波。
+
+`expression` 映射（松手不为 0）：
+
+```text
+expression = EXPR_MIN + (fsr_filtered × (255 - EXPR_MIN)) >> 8
+EXPR_MIN 默认 96
+```
+
+若不抬高基线，`expression=0` 会让 `adsr` 的包络乘 0，整件乐器无声。
 
 ---
 
@@ -191,6 +200,7 @@ pitch_bend = clamp(2048 + (pot_raw - 128) * 16, 0, 4095)
 | `SAMPLE_INTERVAL` | 540 | 20 us 间隔，7 通道轮询 |
 | `FSR_CHANNEL` | 0 | ADS7830 CH0 |
 | `POT_CHANNEL` | 1 | ADS7830 CH1 |
+| `EXPR_MIN` | 96 | 表情最小值：松手时的基线音量，避免整件乐器无声 |
 | `TRIG_BASE_CH` | 2 | 触发 P0 所在通道，P0~P4 = CH2~CH6 |
 | `TRIG_THRESH` | 20 | 触发阈值（ADC 码） |
 | `TRIG_HYST` | 4 | 释放回差 |

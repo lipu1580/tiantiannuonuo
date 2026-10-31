@@ -26,6 +26,7 @@ Makefile 中豁免）。
 | `tb_key_debounce` | 抖动抑制、单次按下/释放、长按不重复、多键独立 | PASS | `build/tb_key_debounce.log` |
 | `tb_adc_ads7830` | I2C START/地址/命令/Repeated START/读数据 | PASS | `build/tb_adc_ads7830.log` |
 | `tb_fsr_filter` | 滤波、噪声门限、轻/中/重按映射、通道隔离 | PASS | `build/tb_fsr_filter.log` |
+| `tb_expression_mapper` | 中心死区、线性映射、两端限幅、waveform_sel | PASS | `build/tb_expression_mapper.log` |
 | `tb_event_queue` | 顺序、背压稳定、溢出标志、满时同拍读写 | PASS | `build/tb_event_queue.log` |
 | `tb_fsr_trigger` | 5 路阈值/力度/保持/电平释放/防重复/兜底 NOTE_OFF/ALL_OFF | PASS | `build/tb_fsr_trigger.log` |
 | `tb_matrix_config` | MATRIX_MODE=1：选根音/八度/波形/ALL_OFF，不产生 NOTE_ON | PASS | `build/tb_matrix_config.log` |

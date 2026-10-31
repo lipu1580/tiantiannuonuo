@@ -366,10 +366,16 @@ module input_top #(
         .waveform_sel     (waveform_sel)
     );
 
-    // expression 直接使用 FSR 滤波值；expr_valid 表示 FSR 至少采过一次样。
-    // 成员 1 可以在 expr_valid=1 后持续读取 expression。
+    // expression 直接使用 FSR 滤波值，并抬升到 EXPR_MIN..255。
+    //   若直接输出 fsr_filtered，松手时为 0，audio_core 的
+    //   envelope = level × velocity × expression 会被乘成 0 → 整件乐器无声。
+    //   映射到 EXPR_MIN..255 后，松手仍保留基线音量，按下才推到满。
+    localparam logic [7:0] EXPR_MIN = project_params_pkg::EXPR_MIN;
+    logic [15:0] expr_span;
+
     assign expr_valid = fsr_ready;
-    assign expression = fsr_filtered;
+    assign expr_span  = 16'(fsr_filtered) * 16'(8'd255 - EXPR_MIN);
+    assign expression = EXPR_MIN + 8'(expr_span >> 8);
 
     //-------------------------------------------------------------------------
     // 按键/FSR 触发事件 -> 仲裁 -> FIFO
@@ -495,14 +501,57 @@ module input_top #(
         end
     end
 
-    assign queue_wr_valid = matrix_sel | trig_sel;
-    assign queue_wr_type  = matrix_sel ? matrix_req_type : trig_req_type;
-    assign queue_wr_note  = matrix_sel ? matrix_req_note : trig_req_note;
-    assign queue_wr_vel   = matrix_sel ? matrix_req_vel  : trig_req_vel;
+    //-------------------------------------------------------------------------
+    // 输出保持（1 深度 skid buffer）
+    //
+    //   目的：满足 valid/ready 协议——一旦 queue_wr_valid=1，字段必须保持到
+    //   queue_wr_ready=1。上游（矩阵译码器/FSR 触发）在背压期间可能产生
+    //   新事件，若直接组合输出，字段会被改写（记 F-17）。
+    //
+    //   规则：
+    //     - skid 空且 FIFO 能收：本拍直接写入 FIFO，源收到 ready；
+    //     - skid 空且 FIFO 满：本拍把事件锁进 skid，源仍收到 ready；
+    //     - skid 非空：只把 skid 里的事件送去 FIFO，源暂时不给 ready。
+    //-------------------------------------------------------------------------
+    logic        hold_valid;
+    logic [1:0]  hold_type;
+    logic [6:0]  hold_note;
+    logic [7:0]  hold_vel;
 
-    // 只有被选中的源才会看到 ready；另一个源继续持有事件
-    assign matrix_req_ready = queue_wr_ready && matrix_sel;
-    assign trig_req_ready   = queue_wr_ready && trig_sel;
+    wire sel_valid = matrix_sel | trig_sel;
+
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n) begin
+            hold_valid <= 1'b0;
+            hold_type  <= 2'b00;
+            hold_note  <= '0;
+            hold_vel   <= '0;
+        end else if (hold_valid) begin
+            if (queue_wr_ready) begin
+                hold_valid <= 1'b0;
+            end
+        end else if (sel_valid && !queue_wr_ready) begin
+            // FIFO 本拍收不下：先存进 skid，保证字段不再变化
+            hold_valid <= 1'b1;
+            hold_type  <= matrix_sel ? matrix_req_type : trig_req_type;
+            hold_note  <= matrix_sel ? matrix_req_note : trig_req_note;
+            hold_vel   <= matrix_sel ? matrix_req_vel  : trig_req_vel;
+        end
+    end
+
+    // 只有确实能进 FIFO 时才拉高 valid，避免被 event_queue 误判为 overflow。
+    // wr_ready 只由 FIFO 内部计数决定，不依赖 wr_valid，所以这样门控是安全的。
+    assign queue_wr_valid = (hold_valid || sel_valid) && queue_wr_ready;
+    assign queue_wr_type  = hold_valid ? hold_type :
+                            (matrix_sel ? matrix_req_type : trig_req_type);
+    assign queue_wr_note  = hold_valid ? hold_note :
+                            (matrix_sel ? matrix_req_note : trig_req_note);
+    assign queue_wr_vel   = hold_valid ? hold_vel  :
+                            (matrix_sel ? matrix_req_vel  : trig_req_vel);
+
+    // 源在事件被 FIFO 或 skid 接收后即可清除槽位
+    assign matrix_req_ready = matrix_sel && !hold_valid;
+    assign trig_req_ready   = trig_sel   && !hold_valid;
 
     // ALL_OFF 被 FIFO 接收的同拍，通知 fsr_trigger 清活跃状态/待发事件
     assign trig_all_off = matrix_req_valid &&

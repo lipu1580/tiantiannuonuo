@@ -175,7 +175,8 @@ module audio_core #(
     pcm_stream_adapter #(
         .INPUT_W   (INPUT_W /* default 24 */),
         .SAMPLE_W  (SAMPLE_W /* default 16 */),
-        .FIFO_DEPTH(PCM_FIFO_DEPTH /* default 4 */)
+        .FIFO_DEPTH(PCM_FIFO_DEPTH /* default 4 */),
+        .MIX_SHIFT (0) // mixer 已包含四声部的 /4 衰减，这里只限幅。
      ) pcm_stream_adapter (
         .sys_clk     (sys_clk),
         .rst_n       (rst_n),

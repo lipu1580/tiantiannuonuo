@@ -204,8 +204,14 @@ module tb_audio_core;
             end
             if (dut.mixed_valid) begin
                 generated++;
-                if (pcm_queue.size() < DEPTH)
-                    pcm_queue.push_back(16'($signed(dut.mixed_sample) >>> 8));
+                if (pcm_queue.size() < DEPTH) begin
+                    if ($signed(dut.mixed_sample) > 32767)
+                        pcm_queue.push_back(16'sh7fff);
+                    else if ($signed(dut.mixed_sample) < -32768)
+                        pcm_queue.push_back(16'sh8000);
+                    else
+                        pcm_queue.push_back(16'(dut.mixed_sample));
+                end
                 else begin dropped++; overflow_expected = 1; end
             end
             if (expr_valid) begin
@@ -280,9 +286,10 @@ module tb_audio_core;
         check(active_voice_count == 1, "expression mute must not release voice");
         update_expr(255); samples(32);
         $display("MEASURE expression full=%0d half=%0d", full_peak, half_peak);
-        // 16-bit DDS -> Q16 envelope -> /4 mix 应仍是16位幅值。
-        // 当前 core 又以24位满幅格式转16位，额外损失8位；作为诊断而非未约定增益的硬断言。
-        if (full_peak < 100) $display("DIAGNOSTIC low PCM gain: inspect voice/adapter binary-point agreement");
+        // 单声部满力度、满 expression，持续电平 49152/65536，混音再 /4。
+        // 峰值应约 6000；允许采样相位和整数舍入偏差，拒绝重复 /4 或 /256。
+        check(full_peak >= 5800 && full_peak <= 6300,
+              "single-voice PCM amplitude must preserve mixer scale");
 
         begin_case("short / random / overflowing PCM backpressure");
         before_drop = dropped;

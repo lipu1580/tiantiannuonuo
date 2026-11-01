@@ -6,7 +6,7 @@ module tang_nano20k_top #(
     parameter integer SAMPLE_RATE = 48_000,
     parameter integer VOICE_COUNT = 4,
     // 0: matrix keys play notes; 1: matrix selects root, FSR triggers notes.
-    parameter integer MATRIX_MODE = 0,
+    parameter integer MATRIX_MODE = 1,
     // Compile-time selection: 0=real inputs, 1=input test source,
     // 2=audio core test source. Change parameter and rebuild to switch.
     parameter integer TEST_SOURCE = 0,

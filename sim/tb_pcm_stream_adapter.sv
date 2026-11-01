@@ -3,12 +3,15 @@
 module tb_pcm_stream_adapter #(
     parameter integer INPUT_W = 24,
     parameter integer SAMPLE_W = 16,
-    parameter integer FIFO_DEPTH = 4
+    parameter integer FIFO_DEPTH = 4,
+    parameter integer MIX_SHIFT = 0
 );
-    localparam integer SHIFT = INPUT_W - SAMPLE_W;
+    localparam integer SHIFT = MIX_SHIFT;
     localparam longint signed SCALE = 64'sd1 << SHIFT;
     localparam longint signed INPUT_MAX = (64'sd1 << (INPUT_W - 1)) - 1;
     localparam longint signed INPUT_MIN = -(64'sd1 << (INPUT_W - 1));
+    localparam longint signed PCM_MAX = (64'sd1 << (SAMPLE_W - 1)) - 1;
+    localparam longint signed PCM_MIN = -(64'sd1 << (SAMPLE_W - 1));
     localparam integer GROUPS = 6;
     localparam integer CASES = 10;
     localparam integer RESET_ERR = 0, VALID_ERR = 1, DATA_ERR = 2,
@@ -43,7 +46,8 @@ module tb_pcm_stream_adapter #(
     string summary_path = "/tmp/tb_pcm_stream_adapter_summary.txt";
 
     pcm_stream_adapter #(
-        .INPUT_W(INPUT_W), .SAMPLE_W(SAMPLE_W), .FIFO_DEPTH(FIFO_DEPTH)
+        .INPUT_W(INPUT_W), .SAMPLE_W(SAMPLE_W), .FIFO_DEPTH(FIFO_DEPTH),
+        .MIX_SHIFT(MIX_SHIFT)
     ) DUT (.*);
 
     always #5 sys_clk = ~sys_clk;
@@ -52,7 +56,7 @@ module tb_pcm_stream_adapter #(
         case (group_id)
             RESET_ERR:    return "RESET / 复位";
             VALID_ERR:    return "VALID / 空满与有效信号";
-            DATA_ERR:     return "DATA / 高位转换、队首时序与样本顺序";
+            DATA_ERR:     return "DATA / 幅值缩放、饱和限幅、队首时序与样本顺序";
             STEREO_ERR:   return "STEREO / 左右声道一致";
             HOLD_ERR:     return "HOLD / 下游阻塞期间保持";
             OVERFLOW_ERR: return "OVERFLOW / 丢样标志及粘滞保持";
@@ -64,7 +68,7 @@ module tb_pcm_stream_adapter #(
         case (group_id)
             RESET_ERR: return "检查复位是否清空队列并清除 overflow；空队列的数据值不作要求。";
             VALID_ERR: return "检查实际 push/pop 与计数更新，尤其是空队列及满时同拍出入队。";
-            DATA_ERR: return "先检查握手沿之前是否已经输出队首，再检查保留高位、符号、指针及丢样；不是等 pop 后才输出被接收的样本。";
+            DATA_ERR: return "先检查握手沿之前是否已经输出队首，再检查缩放、限幅、符号、指针及丢样；不是等 pop 后才输出被接收的样本。";
             STEREO_ERR: return "左右声道应来自同一份队首样本，并使用一次共同握手。";
             HOLD_ERR: return "valid && !ready 后必须保持 valid 和数据直到接收；检查是否覆盖队首或错误推进读指针。";
             OVERFLOW_ERR: return "输入有效且满且无出队时置位，保持至复位；满时成功出队仍可入队，不能误报。";
@@ -95,12 +99,14 @@ module tb_pcm_stream_adapter #(
     endtask
 
     // 用整数除法独立计算参考值，避免复制 DUT 的移位/切片写法。
-    // SV 除法向零取整，负数有余数时减一，得到保留高位的向下取整结果。
+    // SV 除法向零取整，负数有余数时减一，实现算术移位的向下取整。
     function automatic pcm_t reference_pcm(input input_t sample_value);
         longint signed value, quotient;
         value = longint'(sample_value);
         quotient = value / SCALE;
         if (value < 0 && value % SCALE != 0) quotient--;
+        if (quotient > PCM_MAX) quotient = PCM_MAX;
+        if (quotient < PCM_MIN) quotient = PCM_MIN;
         return pcm_t'(quotient);
     endfunction
 
@@ -215,8 +221,8 @@ module tb_pcm_stream_adapter #(
         report_fd = $fopen(summary_path, "w");
         if (report_fd == 0) $display("WARNING: cannot write summary file %s", summary_path);
         report_line("\n===== PCM STREAM ADAPTER 自动检查总结 =====");
-        report_line($sformatf("RESULT: %s | INPUT_W=%0d SAMPLE_W=%0d FIFO_DEPTH=%0d",
-                    (timed_out || errors != 0) ? "FAIL" : "PASS", INPUT_W, SAMPLE_W, FIFO_DEPTH));
+        report_line($sformatf("RESULT: %s | INPUT_W=%0d SAMPLE_W=%0d FIFO_DEPTH=%0d MIX_SHIFT=%0d",
+                    (timed_out || errors != 0) ? "FAIL" : "PASS", INPUT_W, SAMPLE_W, FIFO_DEPTH, MIX_SHIFT));
         report_line($sformatf("cycles=%0d checks=%0d failed_checks=%0d", cycles, checks, errors));
         report_line("失败次数是检查点数量，不等于独立 bug 数量；一个时序问题可能导致多类失败。");
         for (int i = 0; i < CASES; i++)
@@ -242,6 +248,8 @@ module tb_pcm_stream_adapter #(
     initial begin
         if (SAMPLE_W < 2 || INPUT_W < SAMPLE_W || INPUT_W > 32 || FIFO_DEPTH < 1)
             $fatal(1, "TB requires 2 <= SAMPLE_W <= INPUT_W <= 32 and FIFO_DEPTH >= 1");
+        if (MIX_SHIFT < 0 || MIX_SHIFT >= INPUT_W)
+            $fatal(1, "TB requires 0 <= MIX_SHIFT < INPUT_W");
         for (int i = 0; i < GROUPS; i++) begin
             group_errors[i] = 0;
             first_error[i] = "";
@@ -251,7 +259,7 @@ module tb_pcm_stream_adapter #(
             case_cycles[i] = 0;
         end
         case_names[0] = "复位、空队列 ready、有效零样本";
-        case_names[1] = "正负满幅、符号及截位边界";
+        case_names[1] = "幅值保持、正负饱和边界及移位舍入";
         case_names[2] = "连续输入输出与 sample_valid=0 忽略输入";
         case_names[3] = "反复填满排空、指针绕回、顺序";
         case_names[4] = "背压期间保持队首，允许队尾入队";
@@ -292,6 +300,24 @@ module tb_pcm_stream_adapter #(
             cycle(1, 0, 1, 0);
         end
         drain();
+
+        // 验证正常幅值保持，以及饱和阈值两侧的输入；避免只测满量程。
+        cycle(1, 1, 0, PCM_MAX / 2);
+        cycle(1, 0, 1, 0);
+        cycle(1, 1, 0, PCM_MIN / 2);
+        cycle(1, 0, 1, 0);
+        for (int offset_value = -2; offset_value <= 2; offset_value++) begin
+            if (PCM_MAX * SCALE + longint'(offset_value) <= INPUT_MAX &&
+                PCM_MAX * SCALE + longint'(offset_value) >= INPUT_MIN) begin
+                cycle(1, 1, 0, PCM_MAX * SCALE + longint'(offset_value));
+                cycle(1, 0, 1, 0);
+            end
+            if (PCM_MIN * SCALE + longint'(offset_value) <= INPUT_MAX &&
+                PCM_MIN * SCALE + longint'(offset_value) >= INPUT_MIN) begin
+                cycle(1, 1, 0, PCM_MIN * SCALE + longint'(offset_value));
+                cycle(1, 0, 1, 0);
+            end
+        end
 
         begin_case(2);
         reset_dut();

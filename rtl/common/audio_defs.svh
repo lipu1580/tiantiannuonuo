@@ -13,8 +13,8 @@ package audio_defs_pkg;
 
     typedef enum logic [1:0] {
         WAVE_SINE     = 2'b00, // 正弦波
-        WAVE_SQUARE   = 2'b01, // 方波
-        WAVE_SAWTOOTH = 2'b10, // 锯齿波
+        WAVE_ORGAN    = 2'b01, // 管风琴类谐波波表
+        WAVE_PLUCK    = 2'b10, // 拨弦类谐波波表，衰减包络由voice提供
         WAVE_RESERVED = 2'b11  // 保留/静音
     } waveform_t;
 

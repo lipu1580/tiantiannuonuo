@@ -32,6 +32,8 @@ module tb_voice #(
     integer positive_samples = 0;
     integer negative_samples = 0;
     logic signed [15:0] sine_table [0:1023];
+    logic signed [15:0] organ_table [0:1023];
+    logic signed [15:0] pluck_table [0:1023];
 
     // 独立维护音符和相位，不读取 DUT 的内部信号。
     // 使用 MIDI 0、A4/A5，直接写出按 48 kHz、32 位相位算出的常量，
@@ -119,8 +121,12 @@ module tb_voice #(
             end
             if (ce) begin
                 ref_phase = ref_phase + increment;
-                raw_sample = (requested_wave == 0)
-                           ? 64'($signed(sine_table[ref_phase[31:22]])) : 64'sd0;
+                case (requested_wave)
+                    0: raw_sample = 64'($signed(sine_table[ref_phase[31:22]]));
+                    1: raw_sample = 64'($signed(organ_table[ref_phase[31:22]]));
+                    2: raw_sample = 64'($signed(pluck_table[ref_phase[31:22]]));
+                    default: raw_sample = 0;
+                endcase
                 product = raw_sample * $signed({1'b0, request_envelope});
                 expected_sample = 24'(product >>> 16);
             end
@@ -165,6 +171,8 @@ module tb_voice #(
 
     initial begin
         $readmemh("rtl/audio/sine_1024.hex", sine_table);
+        $readmemh("rtl/audio/organ_1024.hex", organ_table);
+        $readmemh("rtl/audio/pluck_1024.hex", pluck_table);
         if ($test$plusargs("waves")) begin
             $dumpfile("/tmp/tb_voice.vcd");
             $dumpvars(0, tb_voice);
@@ -256,6 +264,15 @@ module tb_voice #(
         reset_dut();
         repeat (4) sample_step();
         check(active === 1'b0, "reset must discard pending NOTE_ON");
+
+        begin_case("CASE 12: organ / pluck / mute sample arithmetic");
+        reset_dut();
+        start_note(69, 255);
+        repeat (15) sample_step();
+        for (int wave_id = 0; wave_id < 4; wave_id++) begin
+            waveform_sel = 2'(wave_id);
+            repeat (120) sample_step();
+        end
 
         check(positive_samples > 0 && negative_samples > 0,
               "stimulus must cover both positive and negative reference samples");

@@ -291,6 +291,17 @@ module tb_audio_core;
         check(full_peak >= 5800 && full_peak <= 6300,
               "single-voice PCM amplitude must preserve mixer scale");
 
+        begin_case("organ / pluck / mute through expression interface");
+        for (int wave_id = 1; wave_id <= 2; wave_id++) begin
+            update_expr(255, 2048, wave_id); samples(8);
+            peak = 0; trough = 0; measure = 1; samples(480); measure = 0;
+            check(peak > 0 && trough < 0, "instrument must produce bipolar PCM");
+        end
+        update_expr(255, 2048, 3); samples(8);
+        require_silence = 1; samples(50); require_silence = 0;
+        check(active_voice_count == 1, "waveform mute must preserve the active note");
+        update_expr(255, 2048, 0); samples(8);
+
         begin_case("short / random / overflowing PCM backpressure");
         before_drop = dropped;
         @(negedge sys_clk); pcm_ready = 0; samples(2); pcm_ready = 1; samples(8);

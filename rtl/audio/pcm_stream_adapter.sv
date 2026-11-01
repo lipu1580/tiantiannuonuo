@@ -3,7 +3,8 @@
 module pcm_stream_adapter #(
     parameter integer INPUT_W  = 24, // 混音输入位宽
     parameter integer SAMPLE_W = 16, // PCM 输出位宽
-    parameter integer FIFO_DEPTH = 4 // 缓冲样本数
+    parameter integer FIFO_DEPTH = 4, // 当前 FIFO 指针实现仅支持深度 4
+    parameter integer MIX_SHIFT = 2 // 当前 4 声部：混音除以 4，预留叠加余量
 )(
     input  logic                         sys_clk, // 系统主时钟
     input  logic                         rst_n,   // 低有效复位
@@ -17,6 +18,19 @@ module pcm_stream_adapter #(
     output logic                         overflow // 缓冲满时发生过丢样
 );
 
+    // voice 输出虽然用 24 位保存，但幅值仍是 16 位 PCM 标度。
+    // 因此不能因 24 -> 16 位转换而再除以 256。
+    // 默认只除以 4，为四个声部同时满幅发声预留余量。
+    // 前提：INPUT_W >= SAMPLE_W；MIX_SHIFT >= 0。
+    localparam logic signed [SAMPLE_W-1:0] PCM_MAX =
+        {1'b0, {(SAMPLE_W-1){1'b1}}};
+    localparam logic signed [SAMPLE_W-1:0] PCM_MIN =
+        {1'b1, {(SAMPLE_W-1){1'b0}}};
+    localparam logic signed [INPUT_W-1:0] LIMIT_MAX = PCM_MAX;
+    localparam logic signed [INPUT_W-1:0] LIMIT_MIN = PCM_MIN;
+    wire signed [INPUT_W-1:0] scaled_sample;
+    assign scaled_sample = mixed_sample >>> MIX_SHIFT;
+
     logic signed [SAMPLE_W-1:0] mid_product;
     logic is_full, pop, push, is_empty, is_overflow;
     logic [1:0] rd_index, wr_index;
@@ -28,7 +42,13 @@ module pcm_stream_adapter #(
         if (!rst_n) begin
             mid_product = 'b0;
         end else begin
-            mid_product = mixed_sample >>> (INPUT_W - SAMPLE_W);
+            // 超出 PCM 范围时限幅，避免直接截位使正数翻成负数。
+            if (scaled_sample > LIMIT_MAX)
+                mid_product = PCM_MAX;
+            else if (scaled_sample < LIMIT_MIN)
+                mid_product = PCM_MIN;
+            else
+                mid_product = scaled_sample[SAMPLE_W-1:0];
         end
     end
 
@@ -75,7 +95,7 @@ module pcm_stream_adapter #(
         pcm_right = pcm_valid ? queue[rd_index] : 'b0;
     end
     // sample_valid 接 mixer.mixed_valid，不能在 audio_ce 提前读取未完成的样本。
-    // INPUT_W >= SAMPLE_W；约定保留高 SAMPLE_W 位，左右声道复制。
+    // INPUT_W >= SAMPLE_W；按 MIX_SHIFT 缩放并饱和限幅，左右声道复制。
     // FIFO 满且本周期无出队时丢弃新输入，overflow 置 1 并保持至复位。
     // 满载时若同周期成功出队，仍应接收新样本；不覆盖被阻塞的队首。
     // pcm_valid && !pcm_ready 时，pcm_valid/pcm_left/pcm_right 必须保持。

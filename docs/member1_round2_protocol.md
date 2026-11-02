@@ -20,6 +20,84 @@
 
 ---
 
+## 0. 成员 1 交付清单（先看这一节）
+
+这一节把「谁提供什么、谁改什么」钉死。**其余章节都是细节，本节是索引。**
+
+### 0.1 前置条件（不满足则本轮无法联调）
+
+| # | 前置条件 | 当前状态 | 动作 |
+|---|---|---|---|
+| P1 | `rtl/audio/audio_core_expr.sv` 骨架进 main | ❌ **只在 `SWX-dev` 的 `0a582fa`** | 成员 1 先把这个提交并入 `dev/v2` |
+| P2 | `rtl/audio/audio_fx_chain.sv` 骨架进 main | ❌ 同上 | 同上 |
+| P3 | `organ_1024.hex` / `pluck_1024.hex` 波表进 main | ❌ **只在 `SWX-dev` 的 `52c5450`** | 同上（**不要**带 `0a582fa` 之外的其它骨架改动） |
+| P4 | `audio_defs.svh` 波形枚举改名 | ❌ 同上（`52c5450`） | 见 §0.3，**改名是破坏性变更** |
+
+> 成员 2 的 `key_event_decoder` 现在 `import audio_defs_pkg::WAVE_SAWTOOTH`。
+> P4 一旦合入，这行会编译失败。**改名前请先在群里说一声**，成员 2 会同步改成
+> `WAVE_PLUCK`（只改 1 行）。双方任何一方先合入都会短暂红一次，属正常。
+
+### 0.2 成员 1 将要**提供**的东西（新增文件 / 新增实现）
+
+| 交付物 | 类型 | 验收方式 |
+|---|---|---|
+| `audio_core_expr.sv` 内部实现（旧 `audio_core` 内容 + cfg 译码 + fx 集成） | 新增实现 | `tb_cfg_decode` PASS，`make lint-all` 0 error |
+| `audio_fx_chain.sv` 内部实现（延迟 RAM / 合唱 / 混响 / 旁路 / 控制状态机） | 新增实现 | `tb_audio_fx_chain` PASS |
+| `organ_1024.hex`、`pluck_1024.hex` 与 `waveform_rom` 的 `casez` 分支 | 新增资源 | `tb_waveform_rom` PASS（≥4096 checks） |
+| `sim/tb_cfg_decode.sv`、`sim/tb_audio_fx_chain.sv` | 新增 TB | `make sim-audio` 全绿 |
+| **接线说明**（见 §10） | 文档 | 成员 3 能照抄改顶层 |
+
+### 0.3 成员 1 将要**更改**的东西（改动 / 破坏性变更）
+
+| 文件 | 改什么 | 会不会影响别人 |
+|---|---|---|
+| `rtl/audio/waveform_rom.sv` | 补 `01`（管风琴）/ `10`（拨弦）分支，`11` 输出 0 | 不影响，纯内部 |
+| `rtl/common/audio_defs.svh` | `WAVE_SQUARE→WAVE_ORGAN`、`WAVE_SAWTOOTH→WAVE_PLUCK` | ⚠️ **影响成员 2**：`key_event_decoder.sv` 有 `import ... WAVE_SAWTOOTH` |
+| `audio_core_expr.sv` 骨架里的 `pitch_bend` 注释 | `0/2048/4095 对应 -2/0/+2 半音` → **改为「连续值，0=-2 半音，2048=0，4095=+2 半音」** | 不影响编译，但**必须改**，否则实现时容易写成三档 |
+| `audio_core_expr.sv` 骨架里的 `MASTER_GAIN` 注释 | `本轮不接配置总线` → 保持（`0x00` 本轮确实不开放） | 无 |
+| `audio_core_expr.sv` 骨架里的 `waveform_sel` 注释 | 确认写的是 `00 正弦 / 01 管风琴类 / 10 拨弦类 / 11 静音` | 无 |
+
+### 0.4 成员 1 **不要动**的东西
+
+| 路径 | 归属 |
+|---|---|
+| `rtl/input/*` | 成员 2（本轮改键位 + 新增 `cfg_master`） |
+| `rtl/top/tang_nano20k_top.sv` | 成员 3 |
+| `constraints/*` | 成员 3 |
+| 旧 `rtl/audio/audio_core.sv` | 保持可回退，不要删、不要改端口 |
+
+### 0.5 **端口层面：成员 1 需要动哪些端口？**
+
+结论先说：**`audio_core_expr` 一个端口都不用增删**，`0a582fa` 的骨架端口集合已经是最终形态。
+
+| 端口组 | 数量 | 是否要改 |
+|---|---|---|
+| 时钟/复位/`audio_ce` | 3 | 不改 |
+| 事件 `event_*` | 5 | 不改 |
+| 表情 `expr_valid/expression/pitch_bend/waveform_sel` | 4 | 不改（**只改 `pitch_bend` 注释**） |
+| **cfg `cfg_*`** | **6** | **不改**（骨架已有，成员 2 的 `input_top` 会输出同样 6 根） |
+| PCM `pcm_*` | 4 | 不改 |
+| 测试 `test_mode/test_pattern` | 2 | 不改 |
+| 状态 `active_voice_count/voice_active` | 2 | 不改 |
+
+**成员 1 唯一需要「通知别人」的端口级事项**：`input_top` 新增的 6 根 `cfg_*`
+（成员 2 提供）要接到 `audio_core_expr` 的 6 根 `cfg_*`，方向刚好互补：
+
+```
+input_top            audio_core_expr
+cfg_valid   ────────► cfg_valid
+cfg_write   ────────► cfg_write
+cfg_addr    ────────► cfg_addr
+cfg_wdata   ────────► cfg_wdata
+cfg_ready   ◄──────── cfg_ready
+cfg_rdata   ◄──────── cfg_rdata   （成员 2 本轮不读，可先不接）
+```
+
+完整端口权威清单见 **§10.1**。
+
+
+---
+
 ## 1. 本轮范围与分工
 
 本轮方案：**新增功能走配置总线，已有功能维持原控制方式，旧地址只预留不迁移。**
@@ -387,3 +465,143 @@ waveform_sel = 2'b10
 | **15** | （V1.0）`0x24`/`0x28` 为保留地址 | **恢复为读写**；深度实际按 0/25/50/100 四档写入，速率用默认 5 Hz 不写 | 颤音回来了，但只做档位、不做独立按键 |
 | **16** | （V1.0）波形 4 键直选（含静音） | **波形 3 键直选**（0/1/2）；`11` 静音保留编码、无实体键 | K15 让位给合唱/颤音 |
 | **17** | 未说明按键复用归属 | 明确**成员 2 在输入侧完成短按/长按识别（600 ms）**，成员 1 只收普通寄存器写 | 复用逻辑不能泄漏到音频侧 |
+
+---
+
+## 10. 端口权威清单与顶层接线
+
+本节是**唯一权威的端口列表**。前面的表格描述语义，这里描述「照抄什么」。
+`0a582fa` 的骨架端口集合已经是最终形态，**不需要增删任何端口**。
+
+### 10.1 `audio_core_expr` 完整端口（成员 1 实现，成员 3 例化）
+
+```systemverilog
+module audio_core_expr #(
+    parameter integer VOICE_COUNT    = 4,
+    parameter integer NOTE_W         = 7,
+    parameter integer SAMPLE_W       = 16,
+    parameter integer SAMPLE_RATE    = 48_000,
+    parameter integer PHASE_W        = 32,
+    parameter integer VOICE_W        = 24,
+    parameter integer WAVE_ADDR_W    = 10,
+    parameter integer PCM_FIFO_DEPTH = 4,
+    parameter logic [7:0]  MASTER_GAIN   = 8'd255,
+    parameter logic [15:0] ATTACK_STEP   = 16'd500,
+    parameter logic [15:0] DECAY_STEP    = 16'd30,
+    parameter logic [15:0] SUSTAIN_LEVEL = 16'd42000,
+    parameter logic [15:0] RELEASE_STEP  = 16'd40,
+    parameter integer INPUT_W        = 24,
+    parameter integer OUTPUT_W       = 24,
+    parameter integer FX_DELAY_DEPTH = 4096      // 本轮新增
+)(
+    input  logic        sys_clk,
+    input  logic        rst_n,          // 低有效，同步复位
+    input  logic        audio_ce,       // 单周期采样使能
+
+    // 事件（与旧 audio_core 完全一致）
+    input  logic        event_valid,
+    output logic        event_ready,
+    input  logic [1:0]  event_type,
+    input  logic [NOTE_W-1:0] event_note_id,
+    input  logic [7:0]  event_velocity,
+
+    // 表情（与旧 audio_core 完全一致）
+    input  logic        expr_valid,
+    input  logic [7:0]  expression,
+    input  logic [11:0] pitch_bend,     // 连续值：0=-2 半音，2048=0，4095=+2 半音
+    input  logic [1:0]  waveform_sel,   // 00 正弦 / 01 管风琴 / 10 拨弦 / 11 静音
+
+    // cfg 配置总线（本轮新增，6 根）
+    input  logic        cfg_valid,
+    output logic        cfg_ready,
+    input  logic        cfg_write,
+    input  logic [7:0]  cfg_addr,
+    input  logic [31:0] cfg_wdata,
+    output logic [31:0] cfg_rdata,
+
+    // PCM
+    output logic        pcm_valid,
+    input  logic        pcm_ready,
+    output logic signed [SAMPLE_W-1:0] pcm_left,
+    output logic signed [SAMPLE_W-1:0] pcm_right,
+
+    // 测试与状态
+    input  logic        test_mode,
+    input  logic [1:0]  test_pattern,
+    output logic [$clog2(VOICE_COUNT+1)-1:0] active_voice_count,
+    output logic [VOICE_COUNT-1:0] voice_active
+);
+```
+
+相对旧 `audio_core` 的**唯一**差异：多了 6 根 `cfg_*` 和 1 个 `FX_DELAY_DEPTH` 参数。
+其余端口名、方向、位宽、语义**逐字相同**，所以成员 3 可以「把例化名从 `audio_core`
+改成 `audio_core_expr`，再补 6 根 cfg」就完成切换。
+
+### 10.2 `audio_fx_chain` 只在 `audio_core_expr` 内部例化
+
+```systemverilog
+module audio_fx_chain #(
+    parameter integer SAMPLE_W      = 24,
+    parameter integer SAMPLE_RATE   = 48_000,
+    parameter integer DELAY_DEPTH   = 4096
+)(
+    input  logic sys_clk,
+    input  logic rst_n,
+    input  logic in_valid,
+    input  logic signed [SAMPLE_W-1:0] in_sample,
+    output logic out_valid,
+    output logic signed [SAMPLE_W-1:0] out_sample,
+    input  logic ctrl_valid,
+    output logic ctrl_ready,
+    input  logic [1:0]  ctrl_mode,
+    input  logic [7:0]  ctrl_wet_gain,
+    input  logic [11:0] ctrl_delay_samples,
+    input  logic [7:0]  ctrl_feedback_gain,
+    input  logic        ctrl_clear,
+    output logic        fx_busy,
+    output logic        fx_initialized,
+    output logic [1:0]  fx_active_mode
+);
+```
+
+**顶层看不到这个模块**。成员 3 不需要例化它，也不要把 `fx_status` 当端口引出——
+它只能通过 `cfg_addr=0x44` 读到。
+
+### 10.3 成员 3 改顶层的完整清单
+
+| 动作 | 内容 |
+|---|---|
+| ➕ 声明 6 根 wire | `cfg_valid / cfg_write / cfg_addr[7:0] / cfg_wdata[31:0] / cfg_ready / cfg_rdata[31:0]` |
+| ➕ `input_top` 侧接线 | `.cfg_valid(...)`, `.cfg_write(...)`, `.cfg_addr(...)`, `.cfg_wdata(...)`, `.cfg_ready(cfg_ready)`, `.cfg_rdata(32'd0)` |
+| ➕ `audio_core_expr` 侧接线 | 前 4 根同向连过去，`cfg_ready/cfg_rdata` 反向接回 |
+| ➖ `input_top` 删除 | 参数 `.MATRIX_MODE(...)`、端口 `.octave_debug()` |
+| 🔄 例化替换 | `audio_core u_core(...)` → `audio_core_expr u_core(...)` |
+| ⚠️ 补参数 | `.FX_DELAY_DEPTH(4096)` |
+| ⚠️ 已有但未接 | `key_ghost_debug` / `key_conflict_debug` / `adc_timeout_debug` 显式留空 |
+
+`input_top` 在 `audio_core_expr` 接入之前，`cfg_ready` 接常量 `1'b1` 即可：
+成员 2 的序列会瞬间写完、无副作用，接入后**成员 2 的代码一行都不用改**。
+
+### 10.4 两个必须遵守的时序承诺
+
+| 承诺 | 数值 | 违反了会怎样 |
+|---|---|---|
+| `cfg_ready` 除 `fx_clear` 未完成外恒为 1 | 全程 | 成员 2 一次按键连贯发 5 笔，被拖成几毫秒 → 按键「没反应」 |
+| 效果器初始化时间 | **≤ 1 ms** | 上电后 `busy=1` 期间只能出干声；超过 1 ms 会听出「开头 1 ms 没效果」 |
+| `ctrl_ready=0` 期间 `out_valid` 仍须逐样本输出 | 连续 | PCM FIFO 见底 → 爆音/断音 |
+| `FX_DELAY_DEPTH` 改动时 `ctrl_delay_samples` 位宽 | `$clog2(DELAY_DEPTH)` | 12 位只在 `4096` 下刚好；改成 8192 需要 13 位 |
+
+### 10.5 hex 波表的路径约定
+
+`waveform_rom.sv` 里的 `$readmemh` 必须用**相对工程根目录**的路径：
+
+```systemverilog
+$readmemh("rtl/audio/organ_1024.hex", rom_organ);
+$readmemh("rtl/audio/pluck_1024.hex", rom_pluck);
+```
+
+- `make sim-audio` 在工程根目录执行，能找到；
+- Gowin EDA 综合时需要把 `rtl/audio/` 加入 **Include Path / File List**，并确认
+  综合日志里两个 hex 都是 `read 1024 words`，否则板上是静音；
+- 若读失败，`waveform_rom` 应**降级为输出正弦**而不是输出 0，
+  这样即使 hex 丢了也能出声（便于现场定位）。

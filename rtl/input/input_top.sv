@@ -49,7 +49,6 @@
 //      input_overflow（粘滞）。
 //=============================================================================
 import audio_defs_pkg::EVENT_ALL_NOTES_OFF;
-import audio_defs_pkg::DEFAULT_VELOCITY;
 
 module input_top #(
     //-------------------------------------------------------------------------
@@ -99,13 +98,6 @@ module input_top #(
     parameter logic [6:0] BASE_NOTE    = project_params_pkg::NOTE_BASE_C4,         // K0 对应 MIDI 60 (C4)
 
     //-------------------------------------------------------------------------
-    // 矩阵/压电演奏模式
-    //   MATRIX_MODE=0：矩阵当键盘（当前测试模式），K0~K11 直接发 NOTE_ON
-    //   MATRIX_MODE=1：矩阵选根音，5 路压电触发（最终演奏模式）
-    //-------------------------------------------------------------------------
-    parameter integer MATRIX_MODE      = 0,
-
-    //-------------------------------------------------------------------------
     // 5 路 FSR 触发输入
     //   参数名不能和 package 参数同名，否则会在模块内遮蔽。
     //-------------------------------------------------------------------------
@@ -118,11 +110,10 @@ module input_top #(
     parameter logic [7:0] TRIG_VEL_FULL  = project_params_pkg::TRIGGER_VEL_FULL_SCALE,   // 力度满量程 ADC 值
 
     //-------------------------------------------------------------------------
-    // 波形切换上限：K14 循环 0..WAVEFORM_MAX_SEL
-    //   成员 1 的 waveform_rom 目前只实现正弦波，切到 1/2 会静音，
-    //   所以默认只允许正弦；波表补齐后再改成 1 或 2。
+    // 短按/长按判决（K15 复用键）
+    //   600 ms 门槛；仿真可覆盖。0 = 用 project_params 的 SYS_CLK_HZ。
     //-------------------------------------------------------------------------
-    parameter logic [1:0] WAVEFORM_MAX_SEL = project_params_pkg::WAVEFORM_MAX_SEL
+    parameter integer TAP_HOLD_MS      = 600
 )(
     //-------------------------------------------------------------------------
     // 时钟与复位（整颗模块单时钟域）
@@ -163,7 +154,19 @@ module input_top #(
     output logic        expr_valid,     // FSR 至少完成一次采样
     output logic [7:0]  expression,     // FSR 持续压力 0~255
     output logic [11:0] pitch_bend,     // 0~4095，中点 2048
-    output logic [1:0]  waveform_sel,   // 0=正弦 1=方波 2=锯齿 3=预留
+    output logic [1:0]  waveform_sel,   // 0=正弦 1=管风琴 2=拨弦 3=静音(无键)
+
+    //-------------------------------------------------------------------------
+    // cfg 配置总线（成员 2 -> 成员 1 的 audio_core_expr）
+    //   由本模块的 cfg_master 驱动；一笔请求 = 一个地址。
+    //   成员 1 未接入时，板级把 cfg_ready 接常量 1'b1 即可（序列瞬间写完、无副作用）。
+    //-------------------------------------------------------------------------
+    output logic        cfg_valid,      // 请求有效
+    output logic        cfg_write,      // 恒 1：本轮只写不读
+    output logic [7:0]  cfg_addr,       // 字节偏移
+    output logic [31:0] cfg_wdata,      // 写数据
+    input  logic        cfg_ready,      // 目标可接收
+    input  logic [31:0] cfg_rdata,      // 组合读回（本轮不使用）
 
     //-------------------------------------------------------------------------
     // 测试模式
@@ -183,7 +186,6 @@ module input_top #(
     output logic        adc_valid,           // ADC 样本有效（单周期）
     output logic        adc_bus_error,       // I2C NACK/异常
     output logic        input_overflow,      // 事件 FIFO 溢出
-    output logic signed [3:0] octave_debug,  // 当前八度偏移 -2~+2
 
     //-------------------------------------------------------------------------
     // 压电输入调试/控制
@@ -233,7 +235,6 @@ module input_top #(
     //-------------------------------------------------------------------------
     logic [KEY_COUNT-1:0] raw_key_state;
     logic [KEY_COUNT-1:0] key_pressed;
-    logic [KEY_COUNT-1:0] key_released;
 
     key_scan #(
         .SYS_CLK_HZ     (SYS_CLK_HZ),
@@ -264,7 +265,7 @@ module input_top #(
         .key_raw      (raw_key_state),
         .key_down     (key_down),
         .key_pressed  (key_pressed),
-        .key_released (key_released)
+        .key_released ()            // 第 2 轮键盘不再发事件，释放沿不需要
     );
 
     //-------------------------------------------------------------------------
@@ -390,13 +391,11 @@ module input_top #(
     );
 
     //-------------------------------------------------------------------------
-    // FSR 力度
-    //   fsr_filter 只接受 sample_channel == FSR_CHANNEL 的样本；
-    //   velocity 是寄存器输出，更新率约 1.4 kHz。
-    //   note_velocity 只在 MATRIX_MODE=0（矩阵当键盘）时用于按键力度；
-    //   MATRIX_MODE=1 时力度由压电峰值提供，FSR 只做 expression。
+    // FSR 表情力度
+    //   fsr_filter 只接受 sample_channel == FSR_CHANNEL 的样本。
+    //   第 2 轮起按键不再发出音符，所以这里不再需要“按键力度”
+    //   （触发音的力度由 fsr_trigger 从 FSR 电平自己算）。
     //-------------------------------------------------------------------------
-    logic [7:0] fsr_velocity;   // 滤波/映射后的 0~255 力度
     logic       pressure_valid; // 当前压力是否超过噪声门限
     logic       fsr_ready;      // FSR 是否完成过至少一次采样
 
@@ -412,15 +411,10 @@ module input_top #(
         .fsr_channel    (FSR_CHANNEL),
         .fsr_raw        (fsr_raw),
         .fsr_filtered   (fsr_filtered),
-        .velocity       (fsr_velocity),
+        .velocity       (),
         .pressure_valid (pressure_valid),
         .ready          (fsr_ready)
     );
-
-    // 按下瞬间若 FSR 尚未稳定（例如刚上电），使用默认力度 128，
-    // 避免发出 velocity=0 的“听不见的 NOTE_ON”。
-    logic [7:0] note_velocity;
-    assign note_velocity = pressure_valid ? fsr_velocity : DEFAULT_VELOCITY;
 
     //-------------------------------------------------------------------------
     // 表情：电位器 -> pitch_bend，按键 -> 波形选择
@@ -452,42 +446,28 @@ module input_top #(
     logic [15:0] expr_span;
 
     assign expr_valid = fsr_ready;
-    assign expr_span  = 16'(fsr_filtered) * 16'(8'd255 - EXPR_MIN);
+    assign expr_span  = 16'(fsr_filtered) * (16'(8'd255) - 16'(EXPR_MIN));
     assign expression = EXPR_MIN + 8'(expr_span >> 8);
 
     //-------------------------------------------------------------------------
-    // 按键/FSR 触发事件 -> 仲裁 -> FIFO
+    // 按键/FSR 触发事件 -> FIFO
     //
-    //   两路事件源：
-    //     matrix_req_*：矩阵译码器（NOTE_ON/OFF/ALL_NOTES_OFF）
-    //     trig_req_*  ：5 路 FSR 触发（NOTE_ON / 电平释放 NOTE_OFF）
-    //
-    //   仲裁优先级：
-    //     1. ALL_NOTES_OFF（矩阵）—— 最高，先清掉所有声部
-    //     2. FSR 触发事件 —— 优先于普通矩阵事件
-    //     3. 矩阵普通事件
-    //
-    //   未被选中的源会把事件保持在各自的 pending 表中，直到 ready。
+    //   第 2 轮起键盘不再产生任何音符事件（只选根音/波形/效果），
+    //   所以进 FIFO 的只有一路：5 路 FSR 触发（NOTE_ON / 电平释放 NOTE_OFF）。
+    //   ALL_NOTES_OFF 仅在「事件源切换到测试模式」时由本模块合成一次，
+    //   用来释放上一来源留下的音符（见下方事件源切换状态机）。
     //-------------------------------------------------------------------------
-    logic        matrix_req_valid;
-    logic        matrix_req_ready;
-    logic [1:0]  matrix_req_type;
-    logic [6:0]  matrix_req_note;
-    logic [7:0]  matrix_req_vel;
-
     logic        trig_req_valid;
     logic        trig_req_ready;
     logic [1:0]  trig_req_type;
     logic [6:0]  trig_req_note;
     logic [7:0]  trig_req_vel;
 
-    logic [6:0]  base_note;       // 当前根音（含八度）
-    logic        trig_all_off;    // ALL_NOTES_OFF 被接收时清触发状态
+    logic [6:0]  base_note;       // 当前根音（无八度）
     logic        stub_restart;    // 事件源切换完成：复位测试序列
     logic        trig_flush;      // 事件源切换完成：清空触发器的积压事件
 
-    // 两路事件源各自的“槽位溢出”标志（粘滞）。为 1 说明极端背压下真丢过事件。
-    logic        matrix_overflow;
+    // 触发器自己的“槽位溢出”标志（粘滞）。为 1 说明极端背压下真丢过事件。
     logic        trig_overflow;
 
     logic        queue_wr_valid;
@@ -503,33 +483,71 @@ module input_top #(
     logic [7:0]  queue_vel;
 
     //-------------------------------------------------------------------------
-    // 矩阵译码器
-    //   MATRIX_MODE=0：K0~K11 直接发 NOTE_ON/OFF（当前测试模式）
-    //   MATRIX_MODE=1：K0~K11 只更新 base_note，不发 NOTE_ON（最终模式）
+    // 键盘译码器：只产出根音 / 波形 / 效果请求，不发事件
     //-------------------------------------------------------------------------
+    logic        fx_req;
+    logic [1:0]  fx_mode_req;
+    logic        tap_pulse;      // K15 短按：合唱
+    logic        hold_pulse;     // K15 长按：颤音档位 +1
+
     key_event_decoder #(
         .KEY_COUNT        (KEY_COUNT),
-        .NOTE_KEY_COUNT   (12),
-        .BASE_NOTE        (BASE_NOTE),
-        .MATRIX_MODE      (MATRIX_MODE),
-        .WAVEFORM_MAX_SEL (WAVEFORM_MAX_SEL)
+        .BASE_NOTE        (BASE_NOTE)
     ) u_decoder (
         .sys_clk          (sys_clk),
         .rst_n            (rst_n),
         .key_pressed      (key_pressed),
-        .key_released     (key_released),
         .key_down         (key_down),
-        .velocity_in      (note_velocity),
-        .event_req_valid  (matrix_req_valid),
-        .event_req_ready  (matrix_req_ready),
-        .event_req_type   (matrix_req_type),
-        .event_req_note   (matrix_req_note),
-        .event_req_velocity (matrix_req_vel),
-        .octave_offset    (octave_debug),
-        .waveform_sel     (waveform_key),
         .base_note        (base_note),
-        .active_note_mask (),
-        .event_overflow   (matrix_overflow)
+        .waveform_sel     (waveform_key),
+        .fx_req           (fx_req),
+        .fx_mode_req      (fx_mode_req),
+        .root_pitch_class (),
+        .active_root_mask ()
+    );
+
+    //-------------------------------------------------------------------------
+    // K15 短按/长按判决（600 ms）
+    //   key_down[15] 已经是消抖后的电平（2 ms 按下 / 5 ms 释放）。
+    //   短按 -> 合唱；长按 -> 颤音档位。两者互斥，不会同时出脉冲。
+    //-------------------------------------------------------------------------
+    key_tap_hold #(
+        .SYS_CLK_HZ (SYS_CLK_HZ),
+        .HOLD_MS    (TAP_HOLD_MS)
+    ) u_tap_hold (
+        .sys_clk    (sys_clk),
+        .rst_n      (rst_n),
+        .key_down   (key_down[KEY_COUNT-1]),
+        .tap_pulse  (tap_pulse),
+        .hold_pulse (hold_pulse)
+    );
+
+    //-------------------------------------------------------------------------
+    // cfg 总线主控：把效果键/长按键翻译成寄存器写序列
+    //   tap_pulse 换上 fx_mode=2（合唱），复用 fx_req 那一套序列。
+    //-------------------------------------------------------------------------
+    logic        cfg_fx_req;
+    logic [1:0]  cfg_fx_mode;
+
+    assign cfg_fx_req  = fx_req | tap_pulse;
+    assign cfg_fx_mode = tap_pulse ? 2'd2 : fx_mode_req;
+
+    cfg_master u_cfg_master (
+        .sys_clk        (sys_clk),
+        .rst_n          (rst_n),
+        .fx_req         (cfg_fx_req),
+        .fx_mode_req    (cfg_fx_mode),
+        .vib_req        (hold_pulse),
+        .cfg_valid      (cfg_valid),
+        .cfg_write      (cfg_write),
+        .cfg_addr       (cfg_addr),
+        .cfg_wdata      (cfg_wdata),
+        .cfg_ready      (cfg_ready),
+        .cfg_rdata      (cfg_rdata),
+        .cfg_busy       (),
+        .fx_mode_latched(),
+        .vib_step       (),
+        .vib_depth      ()
     );
 
     //-------------------------------------------------------------------------
@@ -570,48 +588,24 @@ module input_top #(
     assign piezo_peak_rst = 5'd0;
 
     //-------------------------------------------------------------------------
-    // 事件仲裁：ALL_OFF > FSR 触发 > 矩阵普通事件
-    //-------------------------------------------------------------------------
-    logic matrix_sel;
-    logic trig_sel;
-
-    always_comb begin
-        matrix_sel = 1'b0;
-        trig_sel   = 1'b0;
-
-        if (matrix_req_valid && (matrix_req_type == EVENT_ALL_NOTES_OFF)) begin
-            matrix_sel = 1'b1;
-        end else if (trig_req_valid) begin
-            trig_sel = 1'b1;
-        end else if (matrix_req_valid) begin
-            matrix_sel = 1'b1;
-        end
-    end
-
-    //-------------------------------------------------------------------------
     // 输出保持
     //
-    //   两路源都是“保持式”的：每键 / 每触发通道都有 2 个待发槽位，事件在
-    //   被 event_req_ready 接收之前，字段一定不会变。所以这里不需要额外的
-    //   skid buffer，只要保证“仲裁结果在握手完成前不会变”即可：
-    //     - queue_wr_valid 由 queue_wr_ready 门控，只在真能写进 FIFO 的那一
-    //       拍才拉高，因此 event_queue 永远不会丢事件（wr_valid&&!wr_ready
-    //       不可能出现），它的 overflow 也就不会误报；
-    //     - 是否真的丢过事件，由两路源自己的槽位溢出标志报告（见下方）。
+    //   第 2 轮起只有 FSR 触发一路真实事件源（键盘不再发事件），
+    //   所以不需要仲裁。触发器每通道有 2 个待发槽位，事件在被
+    //   event_req_ready 接收之前字段一定不变，天然满足协议。
     //-------------------------------------------------------------------------
-    assign queue_wr_valid = (matrix_sel | trig_sel) && queue_wr_ready;
-    assign queue_wr_type  = matrix_sel ? matrix_req_type : trig_req_type;
-    assign queue_wr_note  = matrix_sel ? matrix_req_note : trig_req_note;
-    assign queue_wr_vel   = matrix_sel ? matrix_req_vel  : trig_req_vel;
+    assign queue_wr_valid = trig_req_valid && queue_wr_ready;
+    assign queue_wr_type  = trig_req_type;
+    assign queue_wr_note  = trig_req_note;
+    assign queue_wr_vel   = trig_req_vel;
 
     // 源在事件被 FIFO 接收后即可清除槽位
-    assign matrix_req_ready = matrix_sel && queue_wr_ready;
-    assign trig_req_ready   = trig_sel   && queue_wr_ready;
+    assign trig_req_ready = trig_req_valid && queue_wr_ready;
 
-    // ALL_OFF 被 FIFO 接收的同拍，通知 fsr_trigger 清活跃状态/待发事件
-    assign trig_all_off = matrix_req_valid &&
-                          (matrix_req_type == EVENT_ALL_NOTES_OFF) &&
-                          matrix_req_ready;
+    //-------------------------------------------------------------------------
+    // 事件源切换完成：清空触发器里切换前积压的事件
+    //   （合成的 ALL_OFF 已经保证声部被释放，残留事件再送出去只会播放错音）
+    //-------------------------------------------------------------------------
 
     //-------------------------------------------------------------------------
     // 事件 FIFO
@@ -735,7 +729,7 @@ module input_top #(
 
     // 切换完成后，通知触发器/译码器丢弃切换前积压的事件
     //   （ALL_OFF 已经保证声部被释放，残留事件再送出去只会播放错音）
-    assign trig_flush = trig_all_off || stub_restart;
+    assign trig_flush = stub_restart;
 
     always_ff @(posedge sys_clk) begin
         if (!rst_n) begin
@@ -789,7 +783,7 @@ module input_top #(
         if (!rst_n) begin
             ovf_latch <= 1'b0;
         end else begin
-            ovf_latch <= ovf_latch | matrix_overflow | trig_overflow |
+            ovf_latch <= ovf_latch | trig_overflow |
                          queue_fifo_overflow;
         end
     end

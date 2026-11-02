@@ -5,8 +5,7 @@ module tang_nano20k_top #(
     parameter integer SYS_CLK_HZ = 27_000_000,
     parameter integer SAMPLE_RATE = 48_000,
     parameter integer VOICE_COUNT = 4,
-    // 0: matrix keys play notes; 1: matrix selects root, FSR triggers notes.
-    parameter integer MATRIX_MODE = 1,
+    // 第 2 轮起键盘不再发声，MATRIX_MODE 已删除（根音/波形/效果都由键位直选）。
     // Compile-time selection: 0=real inputs, 1=input test source,
     // 2=audio core test source. Change parameter and rebuild to switch.
     parameter integer TEST_SOURCE = 0,
@@ -45,6 +44,15 @@ module tang_nano20k_top #(
     wire [11:0] pitch_bend;
     wire [1:0] waveform_sel;
 
+    // Member 2 -> member 1: cfg 配置总线（效果/颤音参数）。
+    // audio_core_expr 尚未合入，这里先把 cfg_ready 常量置 1：
+    // 按键序列会瞬间写完、无副作用，接入后直接换成 audio_core_expr 的端口即可。
+    wire        cfg_valid;
+    wire        cfg_write;
+    wire [7:0]  cfg_addr;
+    wire [31:0] cfg_wdata;
+    wire        cfg_ready = 1'b1;
+
     // Member 1 -> member 3: signed 16-bit stereo PCM.
     // ready flows BACK from audio_out_top to audio_core.
     wire pcm_valid, pcm_ready;
@@ -63,8 +71,7 @@ module tang_nano20k_top #(
     input_top #(
         .SYS_CLK_HZ(SYS_CLK_HZ),
         .ROW_COUNT(4),
-        .COL_COUNT(4),
-        .MATRIX_MODE(MATRIX_MODE)
+        .COL_COUNT(4)
     ) u_input_top (
         .sys_clk(sys_clk),
         .rst_n(sys_rst_n),
@@ -82,13 +89,19 @@ module tang_nano20k_top #(
         .expression(expression),
         .pitch_bend(pitch_bend),
         .waveform_sel(waveform_sel),
+        .cfg_valid(cfg_valid),
+        .cfg_write(cfg_write),
+        .cfg_addr(cfg_addr),
+        .cfg_wdata(cfg_wdata),
+        .cfg_ready(cfg_ready),
+        .cfg_rdata(32'd0),
         .test_mode(TEST_SOURCE == 1),
         .test_pattern(TEST_PATTERN),
         .adc_bus_error(adc_bus_error),
         .input_overflow(input_overflow),
         // Optional debug outputs need no physical FPGA pins.
         .key_down(), .fsr_raw(), .fsr_filtered(), .input_state(),
-        .adc_busy(), .adc_valid(), .octave_debug(),
+        .adc_busy(), .adc_valid(), .adc_timeout_debug(),
         .piezo_peak_rst(), .piezo_hit_debug(),
         .piezo_active_debug(), .base_note_debug()
     );
@@ -162,8 +175,8 @@ module tang_nano20k_top #(
     initial begin
         if (TEST_SOURCE < 0 || TEST_SOURCE > 2)
             $fatal(1, "TEST_SOURCE must be 0, 1 or 2");
-        if (MATRIX_MODE < 0 || MATRIX_MODE > 1 || VOICE_COUNT < 1)
-            $fatal(1, "Invalid MATRIX_MODE or VOICE_COUNT");
+        if (VOICE_COUNT < 1)
+            $fatal(1, "Invalid VOICE_COUNT");
     end
     // synthesis translate_on
 endmodule

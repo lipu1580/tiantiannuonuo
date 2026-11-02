@@ -45,6 +45,10 @@ output logic [6:0] event_note_id;
 output logic [7:0] event_velocity;
 ```
 
+**第 2 轮起，键盘不产生任何事件**。进入这条总线的只有两路：
+5 路 FSR 触发（NOTE_ON / 电平释放 NOTE_OFF），以及「事件源切换到测试模式」时
+合成的一次 ALL_NOTES_OFF。键盘只负责选根音 / 波形 / 效果（见 §4、§5）。
+
 ### 3.2 编码
 
 | `event_type` | 含义 | `event_note_id` | `event_velocity` |
@@ -81,28 +85,24 @@ output logic [7:0] event_velocity;
 
 因此 `input_overflow=1` 是真丢事件，不是“下游暂时忙”的提示。
 
-### 3.4 事件产生规则（矩阵模式）
+### 3.4 事件产生规则（第 2 轮）
 
-`MATRIX_MODE=0`（当前测试模式）：
+**键盘不产生任何音符事件。** `MATRIX_MODE` 参数已删除，只剩一种演奏模式：
 
-1. 音符键按下沿产生一次 `NOTE_ON`，释放沿产生一次对应 `NOTE_OFF`。
-2. `NOTE_OFF` 的 `note_id` 使用按下瞬间锁存的值。因此按住音符后再切换
-   八度，释放时仍然发送正确的原始音符。
-3. 同一周期多个键按下/释放时，按物理键号从小到大依次入队（ALL_NOTES_OFF
-   除外）。
-4. `ALL_NOTES_OFF` 优先级最高：
-   - 按下时清除所有尚未发送的普通事件；
-   - 对当前按住的音符键置“释放抑制”，这些键稍后释放时不再发 `NOTE_OFF`。
-5. 长按不会重复产生 `NOTE_ON`；只有真实释放后再次按下才会重新触发。
-6. `event_velocity` 在 `NOTE_ON` 入队时锁存当时的 FSR 力度。若 FSR 尚未
-   完成首次采样，使用默认力度 128。
+1. 9 个根音键（K0,K1,K2,K4,K5,K6,K8,K9,K10）只更新 `base_note`，
+   **不发 NOTE_ON/OFF**。
+2. 3 个波形键（K3,K7,K11）只改 `waveform_sel`，见 §4。
+3. 3 个效果键（K12,K13,K14）+ K15 短按只产生 cfg 写序列，见 §4.5。
+4. K15 长按只产生一笔 cfg 写（颤音深度）。
+5. 音符事件**全部**由 5 路 FSR 触发产生，见 §3.5。
+6. 根音变化只影响之后新触发的音符；已发声音符保持原音高
+   （`fsr_trigger` 在按下的瞬间锁存 `note_latched`）。
+7. `event_velocity` 由 `fsr_trigger` 从触发时的 FSR 电平换算
+   （`VEL_FULL_SCALE` 为满量程参考）。
 
-`MATRIX_MODE=1`（最终演奏模式）：
-
-1. K0~K11 只更新 `base_note`（根音），**不产生 NOTE_ON/OFF**。
-2. K13/K15 调整八度，K14 切换波形，K12 产生 `ALL_NOTES_OFF`。
-3. 音符事件全部由 5 路 FSR 触发产生，见 3.5。
-4. 八度/根音变化只影响之后新触发的音符；已发声音符保持原音高。
+`ALL_NOTES_OFF` 在输入侧只有一个来源：**事件源切换到测试模式**时，
+`input_top` 内部合成的释放命令（清掉上一来源留下的音符）。
+键盘按键永远不产生 `ALL_NOTES_OFF`。
 
 ### 3.5 FSR 触发规则
 
@@ -148,7 +148,7 @@ output logic [1:0]  waveform_sel;
 | `expr_valid` | FSR 已完成至少一次有效采样 |
 | `expression` | FSR 滤波后的持续压力，映射到 `EXPR_MIN`~255（默认 96~255） |
 | `pitch_bend` | 电位器映射值 0~4095，2048 为不弯音 |
-| `waveform_sel` | 0=正弦，1=方波，2=锯齿，3=预留 |
+| `waveform_sel` | 0=正弦，1=管风琴类，2=拨弦类，3=静音（保留编码，本轮无键） |
 
 映射关系：
 
@@ -164,12 +164,19 @@ pitch_bend = clamp(2048 + (pot_raw - 128) * 16, 0, 4095)
 | 192 | 3072 |
 | 255 | 4080 |
 
-`waveform_sel` 由 K14 在 `0 .. WAVEFORM_MAX_SEL` 之间循环。
+`waveform_sel` 由 **3 个键直选**（不是循环）：
 
-> **默认 `WAVEFORM_MAX_SEL = 0`（只切正弦）**：成员 1 的 `waveform_rom` 目前只实现了
-> 正弦波，切到 1/2 会让整路音频静音。等波表补平方波/锯齿后，把
-> `project_params.svh` 里的 `WAVEFORM_MAX_SEL` 改成 2，K14 就会恢复 0→1→2→0 循环，
-> 输入侧事件协议不变。
+| 键 | `waveform_sel` |
+|---|---|
+| K3 | `2'b00` 正弦 |
+| K7 | `2'b01` 管风琴类 |
+| K11 | `2'b10` 拨弦类 |
+| —（无键） | `2'b11` 静音 |
+
+按一次即锁定，长按不变。`WAVEFORM_MAX_SEL` 参数**已删除**。
+
+> **前提**：成员 1 的 `organ_1024.hex` / `pluck_1024.hex` 必须已合入
+> （协议 §0.1 前置条件 P3），否则 K7/K11 会静音。
 
 `test_mode=1` 时强制输出正弦波。
 
@@ -181,6 +188,63 @@ EXPR_MIN 默认 96
 ```
 
 若不抬高基线，`expression=0` 会让 `adsr` 的包络乘 0，整件乐器无声。
+
+---
+
+## 4.5 cfg 配置总线（第 2 轮新增）
+
+`input_top` 新增 6 根 cfg 端口，直接对接成员 1 `audio_core_expr` 的 6 根同名端口。
+由内部 `cfg_master` 驱动，把「效果键 / K15 长按」翻译成寄存器写序列。
+
+```systemverilog
+output logic        cfg_valid;   // 请求有效
+output logic        cfg_write;   // 恒 1：本轮只写不读
+output logic [7:0]  cfg_addr;    // 字节偏移
+output logic [31:0] cfg_wdata;   // 写数据
+input  logic        cfg_ready;   // 目标可接收
+input  logic [31:0] cfg_rdata;   // 组合读回（本轮不使用）
+```
+
+### 握手
+
+`cfg_valid && cfg_ready` 的 `sys_clk` 上升沿完成一笔。
+`cfg_valid=1 && cfg_ready=0` 期间 `cfg_addr` / `cfg_wdata` **保持不变**
+（内部由寄存器化的 `seq_mode/step` 组合译码，天然满足）。
+
+### 写入序列（协议 §6 权威版）
+
+| 入口 | 目标模式 | 序列（地址 ← 数据） | 笔数 |
+|---|---|---|---|
+| K12 | 0 旁路 | `0x30←0`, `0x2C←0` | 2 |
+| K13 | 1 延迟 | `0x30←0`, `0x34←1920`, `0x38←64`, `0x2C←1`, `0x30←64` | 5 |
+| K15 短按 | 2 合唱 | `0x30←0`, `0x2C←2`, `0x30←64` | 3 |
+| K14 | 3 混响 | `0x30←0`, `0x2C←3`, `0x30←64` | 3 |
+| K15 长按 | — | `0x24←25/50/100/0` | 1 |
+
+### 抢占
+
+- 效果序列执行中又按了另一个效果键：**下一笔起**切换到新序列第 0 步。
+  最坏会多写出 1 笔旧序列的中间步——因为那一笔的 `valid` 已经在同一拍被对端
+  接收，`valid/ready` 协议不允许撤销。旧序列的中间步不会破坏
+  「湿声关 → 参数 → 模式 → 湿声开」的结构，安全。
+- **颤音不抢占**：`vib_req` 只把待发深度记进一个寄存器，等当前效果序列
+  全部握手完成后再发 `0x24`。代价是几微秒，听不出来。
+
+### 未接入 `audio_core_expr` 时
+
+板级顶层把 `cfg_ready` 接常量 `1'b1`、`cfg_rdata` 接 `32'd0`。
+此时序列会瞬间写完、无副作用，**成员 2 的 RTL 一行都不用改**。
+
+### 成员 3 接线清单
+
+| `input_top` | 方向 | 接到 |
+|---|---|---|
+| `cfg_valid` | out | `audio_core_expr.cfg_valid` |
+| `cfg_write` | out | `audio_core_expr.cfg_write` |
+| `cfg_addr[7:0]` | out | `audio_core_expr.cfg_addr` |
+| `cfg_wdata[31:0]` | out | `audio_core_expr.cfg_wdata` |
+| `cfg_ready` | in | `audio_core_expr.cfg_ready`（未接入时 `1'b1`） |
+| `cfg_rdata[31:0]` | in | `audio_core_expr.cfg_rdata`（未接入时 `32'd0`） |
 
 ---
 
@@ -197,11 +261,10 @@ EXPR_MIN 默认 96
 | `adc_bus_error` | 1 | I2C NACK / 总线不空闲 / 事务超时；下一次事务开始时清除 |
 | `adc_timeout_debug` | 1 | 采样请求看门狗超时（总线钳死、从机无响应），保持到复位 |
 | `input_overflow` | 1 | 源侧待发槽位真的丢过事件，保持到复位 |
-| `octave_debug` | 4 | 当前八度偏移（有符号，-2~+2） |
 | `piezo_peak_rst` | 5 | 旧压电方案遗留，当前恒为 0 |
 | `piezo_hit_debug` | 5 | 5 路 FSR 电平是否超过阈值 |
 | `piezo_active_debug` | 5 | 5 路 FSR 是否正在发声 |
-| `base_note_debug` | 7 | 当前根音（含八度） |
+| `base_note_debug` | 7 | 当前根音 MIDI 编号（= 60 + 音级，无八度概念） |
 | `key_ghost_debug` | 1 | 2x2 矩形内出现 ≥3 个按键：存在鬼键组合 |
 | `key_conflict_debug` | 1 | 同列跨行 ≥2 个按键：行驱动互相争用（无二极管矩阵的电学风险） |
 
@@ -235,10 +298,9 @@ EXPR_MIN 默认 96
 | `TRIG_OFF_MS` | 2000 | 无样本时的兜底 NOTE_OFF |
 | `TRIG_RETRIG_MS` | 20 | 防重复触发窗口 |
 | `TRIG_VEL_FULL` | 200 | 力度满量程 ADC 值 |
-| `MATRIX_MODE` | 0 | 0=矩阵键盘，1=矩阵配置 + FSR 触发 |
+| `TAP_HOLD_MS` | 600 | K15 短按/长按门槛（毫秒）；仿真可覆盖 |
 | `EVENT_FIFO_DEPTH` | 8 | 事件 FIFO 深度 |
 | `BASE_NOTE` | 60 | K0 对应 C4 |
-| `WAVEFORM_MAX_SEL` | 0 | K14 循环上限；波表补齐方波/锯齿后改 2 |
 
 ---
 
@@ -346,8 +408,10 @@ M_ALLOFF: 发出一个合成的 ALL_NOTES_OFF，释放上一来源留下的音�
 |---|---|
 | `key_scan` | 行扫描 + 列同步，输出原始 16 位键状态 + 鬼键/同列告警 |
 | `key_debounce` | 逐键计数消抖，输出状态和单周期边沿 |
-| `note_map` | 键号 → MIDI 音符/功能键 |
-| `key_event_decoder` | 边沿 → 事件，八度/波形状态，ALL_OFF 优先，每键 2 槽位 |
+| `note_map` | 键号 → 根音音级 / 波形 / 效果模式 / 复用键（第 2 轮新映射） |
+| `key_event_decoder` | 边沿 → 根音、波形（直选）、效果请求脉冲；**不发事件** |
+| `key_tap_hold` | K15 短按/长按判决（600 ms，严格互斥） |
+| `cfg_master` | 效果序列发生器 + 颤音档位循环 + 不抢占排队 |
 | `event_queue` | valid/ready FIFO，背压缓存 |
 | `adc_ads7830` | I2C 单次转换读取（通道编码/总线恢复/超时） |
 | `fsr_trigger` | 5 路阈值/迟滞/力度/电平释放/兜底 NOTE_OFF，每路 2 槽位 |
@@ -360,9 +424,24 @@ M_ALLOFF: 发出一个合成的 ALL_NOTES_OFF，释放上一来源留下的音�
 ## 11. 仿真
 
 ```bash
-make lint
-make sim
+make lint        # 输入侧
+make lint-audio  # 音频侧
+make lint-top    # 板级顶层（input + audio + audio_out 全接起来）
+make lint-all    # 上面三个
+make sim         # 输入侧全部 testbench（iverilog）
+make run-<tb>    # 单个 testbench，例如 make run-tb_cfg_master
 ```
 
-每个 testbench 覆盖的最小场景见 `docs/test_record.md`。
-`make sim` 现在会检查仿真器退出码：`$fatal`/超时不会再被 `tee` 掩盖成“通过”。
+第 2 轮新增的 testbench：
+
+| TB | 覆盖 |
+|---|---|
+| `tb_note_map` | 16 键映射逐项核对（9 根音 + 3 波形 + 3 效果 + K15 复用） |
+| `tb_key_tap_hold` | 600 ms 阈值边界、短/长按互斥、长按不重复、复位不出脉冲 |
+| `tb_cfg_master` | 四段序列顺序/数据、颤音档位循环、背压保持、抢占、颤音不抢占、复位 |
+| `tb_key_event_decoder` | 根音/波形直选/效果脉冲/K15 不产生 fx_req（重写） |
+| `tb_input_top` | 整机：A8/A9 无 ALL_OFF 无音符、根音跟随、效果序列、K15 短长按、cfg 背压（重写） |
+
+已删除：`tb_matrix_config`（`MATRIX_MODE` 概念取消，其覆盖面并入上面两个 TB）。
+
+`make sim` 会检查仿真器退出码和 `TEST PASSED` 标记：`$fatal`/超时不会再被掩盖成“通过”。

@@ -277,13 +277,22 @@ module cfg_master #(
 | `sim/tb_note_map.sv` | **新增** | 16 键映射逐项核对（含 9 根音音级表） |
 | `sim/tb_key_tap_hold.sv` | **新增** | 600 ms 阈值边界、短按/长按互斥、长按不重复 |
 | `sim/tb_cfg_master.sv` | **新增** | 四段序列的顺序/数据、颤音档位循环与不抢占、背压保持、复位 |
-| `sim/tb_key_event_decoder.sv` | 改 | 去掉八度/循环/ALL_OFF 用例，加波形直选与 fx 脉冲用例 |
-| `sim/tb_input_top.sv` | 改 | 全键走查；`cfg_*=1` 时序列能走完 |
+| `sim/tb_key_event_decoder.sv` | **重写** | 去掉八度/循环/ALL_OFF 用例，加波形直选与 fx 脉冲用例 |
+| `sim/tb_input_top.sv` | **重写** | 整机：A8/A9、根音跟随、效果序列、K15 短长按、cfg 背压 |
+| `sim/tb_matrix_config.sv` | **删除** | `MATRIX_MODE` 概念取消，覆盖面并入上面两个 TB |
 | `docs/key_map.md` | **重写** | 新键位表（唯一权威） |
-| `docs/input_interface.md` | 改 | 补 `cfg_*` 端口说明与"成员 3 接线须知" |
-| `docs/member2_scope.md` | 改 | 更新职责与接口 |
+| `docs/input_interface.md` | 改 | 补 §4.5 cfg 端口说明与"成员 3 接线清单" |
+| `docs/member2_scope.md` | 改 | 版本升到 3.0，更新职责与模块状态 |
+| `Makefile` | **改（超出原计划）** | `TBS` 加 3 个新 TB、删 `tb_matrix_config`；新增 `lint-top` / `lint-all` |
+| `rtl/top/tang_nano20k_top.sv` | **改（超出原计划）** | 仅 4 处接线：删 `MATRIX_MODE`/`octave_debug`，加 6 根 cfg。不改逻辑 |
 
-**不改**：`rtl/common/*`、`rtl/audio/*`、`rtl/audio_out/*`、`rtl/top/*`、`Makefile`。
+**不改**：`rtl/common/*`、`rtl/audio/*`、`rtl/audio_out/*`、`constraints/*`。
+
+> ⚠️ `Makefile` 与 `rtl/top/tang_nano20k_top.sv` 原本写的是"不改"。
+> 实际执行时改了，原因：
+> 1. 不加 `TBS` 条目，新 TB 永远不会被 `make sim` 跑到；
+> 2. 删了 `input_top` 的端口后，板级顶层会直接编译失败——**项目必须能编译**。
+> 顶层的改动严格限制在"接线"，不含任何逻辑；成员 3 可随时复核。
 
 ---
 
@@ -352,6 +361,9 @@ localparam logic [7:0] CFG_FX_STATUS      = 8'h44;  // 只读，本轮不读
 
 ### 9.1 `input_top` 端口变更 —— 成员 3 必须同步的顶层改动
 
+> **状态（2026-11-02）：已由成员 2 代为改好并 `make lint-top` 通过（0 error）。**
+> 成员 3 只需复核，无需重做。下面保留原始清单作为对照。
+
 本轮 `input_top` 的端口有增有删，**板级顶层 `rtl/top/tang_nano20k_top.sv` 需要跟着改**
 （我们不动成员 3 的文件，只列出需要改的行）：
 
@@ -377,3 +389,66 @@ localparam logic [7:0] CFG_FX_STATUS      = 8'h44;  // 只读，本轮不读
 4. `input_top` 接线 + 扩充 `tb_input_top`
 5. 全量 `make lint` / `make sim`
 6. 文档同步（`key_map.md` 为主）
+
+---
+
+## 11. 实施结果（2026-11-02 已完成）
+
+### 11.1 交付状态
+
+| 交付物 | 状态 | 验证 |
+|---|---|---|
+| `rtl/input/note_map.sv` 重写 | ✅ | `tb_note_map` 17 checks PASS |
+| `rtl/input/key_tap_hold.sv` 新增 | ✅ | `tb_key_tap_hold` 10 checks PASS |
+| `rtl/input/cfg_master.sv` 新增 | ✅ | `tb_cfg_master` 45 checks PASS |
+| `rtl/input/key_event_decoder.sv` 重写 | ✅ | `tb_key_event_decoder` 38 checks PASS |
+| `rtl/input/input_top.sv` 改造 | ✅ | `tb_input_top` PASS（13 条 A 项全覆盖） |
+| 文档 4 份同步 | ✅ | `key_map` / `input_interface` / `member2_scope` / 本文件 |
+| 板级顶层接线 | ✅（代为完成） | `make lint-top` 0 error |
+
+### 11.2 回归结果
+
+```text
+make lint        0 error
+make lint-audio  0 error
+make lint-top    0 error
+make sim         13/13 TEST PASSED
+make sim-audio   PASS（音频侧无回归）
+make sim-v       PASS（Verilator 集成无回归）
+```
+
+### 11.3 与任务书原设计的 4 处偏差（都是有意的）
+
+| # | 原设计 | 实际实现 | 原因 |
+|---|---|---|---|
+| 1 | `cfg_master` 带 `SYS_CLK_HZ` 参数 | **删除该参数** | 序列是纯握手驱动，不需要计时；留着会被 lint 报 UNUSEDPARAM |
+| 2 | `note_map` 带 `KEY_COUNT` 参数 | **删除该参数** | 映射表是 4 位 `case`，用不到；同样会报 UNUSEDPARAM |
+| 3 | 抢占「立刻终止，从第 0 步重跑」 | **语义为「下一笔起切换」** | `fx_req` 与某笔握手同拍时，那笔 `valid` 已被对端接收，`valid/ready` 协议不允许撤销。最坏多写 1 笔旧序列的中间步，不破坏"湿声关→参数→模式→湿声开"结构。已在 `cfg_master.sv` 与 `input_interface.md` 注明 |
+| 4 | `input_top` 新增 6 根 cfg、删 `MATRIX_MODE`/`octave_debug` | 同左，**并新增参数 `TAP_HOLD_MS`（默认 600）** | 短按/长按门槛要能在仿真里覆盖，否则 600 ms 要跑 1620 万拍 |
+
+### 11.4 交付给其他成员的接口
+
+**给成员 1**（已写入协议 §0.5 / §10）：
+
+```
+input_top.cfg_valid  -> audio_core_expr.cfg_valid
+input_top.cfg_write  -> audio_core_expr.cfg_write
+input_top.cfg_addr   -> audio_core_expr.cfg_addr
+input_top.cfg_wdata  -> audio_core_expr.cfg_wdata
+input_top.cfg_ready  <- audio_core_expr.cfg_ready
+input_top.cfg_rdata  <- audio_core_expr.cfg_rdata   (本轮不读)
+```
+
+成员 1 侧**不需要增删任何端口**，只需保证 `cfg_ready` 除 `fx_clear` 未完成外恒为 1。
+
+**给成员 3**（已写入 §9.1 与本文件 §11.1）：顶层接线已完成，复核即可。
+
+### 11.5 仍未闭环的外部依赖
+
+| 依赖 | 阻塞了什么 | 归属 |
+|---|---|---|
+| `audio_core_expr.sv` 实现 | 效果/颤音真正出声 | 成员 1 |
+| `organ_1024.hex` / `pluck_1024.hex` | K7/K11 两个波形键出声 | 成员 1 |
+| `audio_defs.svh` 波形枚举改名 | 编译期会与 `key_event_decoder` 冲突（改 1 行即好） | 成员 1 |
+| `.cst` 引脚 + 上板 | 实际演奏 | 成员 3 |
+| 5 路 FSR 分压电路 | 触发力度标定 | 硬件 |

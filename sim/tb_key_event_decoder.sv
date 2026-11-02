@@ -1,353 +1,280 @@
 //=============================================================================
 // 文件   : tb_key_event_decoder.sv
-// 功能   : 矩阵事件译码器单元测试。
+// 功能   : 键盘译码器第 2 轮行为验证。
+//
+//   第 1 轮这个 TB 测的是"键盘发 NOTE_ON/OFF、八度、ALL_OFF"，
+//   第 2 轮键盘不再发任何事件，所以整个 TB 重写。
+//
 //   覆盖：
-//     1. 单键 NOTE_ON / NOTE_OFF（释放用按下时锁存的音高）
-//     2. 同一拍多个键按下 -> 按键号从小到大依次送出
-//     3. 背压下“NOTE_ON 未发出就松手”：NOTE_ON 不能被 NOTE_OFF 覆盖
-//        （评审清单第 7 项）
-//     4. ALL_NOTES_OFF 优先级最高，并且抑制被按住键的释放事件
-//     5. 八度上下限与音高限幅
-//     6. 波形循环（WAVEFORM_MAX_SEL=2 时 0->1->2->0）
-//     7. 同键 3 个事件积压在 2 槽位队列里 -> event_overflow 置位，
-//        但在队事件不被破坏
+//     1. 9 个根音键 -> base_note = 60 + 音级（验收 A1）
+//     2. 根音键不产生任何事件（本模块已经没有事件端口，直接看 fx_req=0）
+//     3. 3 个波形键 -> waveform_sel = 0/1/2，直选不循环（验收 A3）
+//     4. K12/K13/K14 -> fx_req 脉冲 + fx_mode = 0/1/3（验收 A4 的键位部分）
+//     5. K15 不产生 fx_req（它是复用键，由 input_top 的 key_tap_hold 处理）
+//     6. 复位默认：音级 0、波形正弦、无 fx_req
+//     7. 长按根音键不改变其他状态（只锁存，不重复触发）
 //=============================================================================
 `timescale 1ns/1ps
 
 module tb_key_event_decoder;
 
-    logic        clk   = 1'b0;
-    logic        rst_n = 1'b0;
+    logic clk = 1'b0;
+    logic rst_n = 1'b0;
 
-    logic [15:0] key_pressed  = '0;
-    logic [15:0] key_released = '0;
-    logic [15:0] key_down     = '0;
-    logic [7:0]  velocity_in  = 8'd128;
+    logic [15:0] key_pressed = 16'd0;
+    logic [15:0] key_down    = 16'd0;
 
-    logic        event_req_valid;
-    logic        event_req_ready = 1'b1;
-    logic [1:0]  event_req_type;
-    logic [6:0]  event_req_note;
-    logic [7:0]  event_req_velocity;
-
-    logic signed [3:0] octave_offset;
-    logic [1:0]  waveform_sel;
     logic [6:0]  base_note;
-    logic [15:0] active_note_mask;
-    logic        event_overflow;
+    logic [1:0]  waveform_sel;
+    logic        fx_req;
+    logic [1:0]  fx_mode_req;
+    logic [3:0]  root_pitch_class;
+    logic [15:0] active_root_mask;
 
     int errors = 0;
-    int ev_count = 0;
+    int checks = 0;
 
-    logic [1:0] log_type [0:255];
-    logic [6:0] log_note [0:255];
+    // fx_req 脉冲记录
+    int         fx_pulse_cnt = 0;
+    logic [1:0] fx_pulse_mode = 2'd0;
 
     always #5 clk = ~clk;
 
     key_event_decoder #(
-        .KEY_COUNT        (16),
-        .NOTE_KEY_COUNT   (12),
-        .BASE_NOTE        (7'd60),
-        .MATRIX_MODE      (0),
-        .WAVEFORM_MAX_SEL (2'd2)
+        .KEY_COUNT (16),
+        .BASE_NOTE (7'd60)
     ) dut (
-        .sys_clk            (clk),
-        .rst_n              (rst_n),
-        .key_pressed        (key_pressed),
-        .key_released       (key_released),
-        .key_down           (key_down),
-        .velocity_in        (velocity_in),
-        .event_req_valid    (event_req_valid),
-        .event_req_ready    (event_req_ready),
-        .event_req_type     (event_req_type),
-        .event_req_note     (event_req_note),
-        .event_req_velocity (event_req_velocity),
-        .octave_offset      (octave_offset),
-        .waveform_sel       (waveform_sel),
-        .base_note          (base_note),
-        .active_note_mask   (active_note_mask),
-        .event_overflow     (event_overflow)
+        .sys_clk          (clk),
+        .rst_n            (rst_n),
+        .key_pressed      (key_pressed),
+        .key_down         (key_down),
+        .base_note        (base_note),
+        .waveform_sel     (waveform_sel),
+        .fx_req           (fx_req),
+        .fx_mode_req      (fx_mode_req),
+        .root_pitch_class (root_pitch_class),
+        .active_root_mask (active_root_mask)
     );
 
-    //-------------------------------------------------------------------------
-    // 事件监视器
-    //-------------------------------------------------------------------------
     always @(posedge clk) begin
-        if (rst_n && event_req_valid && event_req_ready) begin
-            log_type[ev_count] = event_req_type;
-            log_note[ev_count] = event_req_note;
-            $display("[%0t] EVENT #%0d type=%0d note=%0d vel=%0d",
-                     $time, ev_count, event_req_type, event_req_note,
-                     event_req_velocity);
-            ev_count++;
+        if (rst_n && fx_req) begin
+            fx_pulse_cnt++;
+            fx_pulse_mode = fx_mode_req;
         end
     end
 
-    //-------------------------------------------------------------------------
-    // 按键激励：单拍脉冲 + 稳定状态
-    //-------------------------------------------------------------------------
-    task automatic press_key(input int idx);
+    // 按一下某个键：pressed 一个周期，down 保持几拍再松开
+    task automatic tap(input int k, input int hold_cycles = 3);
         @(negedge clk);
-        key_down[idx]    = 1'b1;
-        key_pressed[idx] = 1'b1;
-        @(posedge clk);
+        key_pressed[k] = 1'b1;
+        key_down[k]    = 1'b1;
         @(negedge clk);
-        key_pressed[idx] = 1'b0;
+        key_pressed[k] = 1'b0;
+        repeat (hold_cycles) @(posedge clk);
+        @(negedge clk);
+        key_down[k] = 1'b0;
+        repeat (2) @(posedge clk);
     endtask
 
-    task automatic release_key(input int idx);
-        @(negedge clk);
-        key_down[idx]     = 1'b0;
-        key_released[idx] = 1'b1;
-        @(posedge clk);
-        @(negedge clk);
-        key_released[idx] = 1'b0;
-    endtask
-
-    task automatic check_event(input int idx, input logic [1:0] t,
-                               input logic [6:0] n, input string msg);
-        if (log_type[idx] !== t || log_note[idx] !== n) begin
-            $display("FAIL [%s]: event%0d = (%0d,%0d), expected (%0d,%0d)",
-                     msg, idx, log_type[idx], log_note[idx], t, n);
+    task automatic chk_base(input logic [6:0] exp, input string msg);
+        checks++;
+        if (base_note !== exp) begin
+            $display("FAIL [%s]: base_note=%0d, 期望 %0d", msg, base_note, exp);
             errors++;
         end else begin
-            $display("PASS [%s]: event%0d = (%0d,%0d)", msg, idx, t, n);
+            $display("PASS [%s]: base_note=%0d", msg, base_note);
         end
     endtask
 
-    task automatic wait_events(input int target, input int timeout,
-                               input string msg);
-        int guard;
-        guard = 0;
-        while (ev_count < target && guard < timeout) begin
-            @(posedge clk);
-            guard++;
-        end
-        if (ev_count < target) begin
-            $display("FAIL [%s]: only %0d events, expected %0d",
-                     msg, ev_count, target);
+    task automatic chk_wave(input logic [1:0] exp, input string msg);
+        checks++;
+        if (waveform_sel !== exp) begin
+            $display("FAIL [%s]: waveform_sel=%0d, 期望 %0d", msg, waveform_sel, exp);
             errors++;
+        end else begin
+            $display("PASS [%s]: waveform_sel=%0d", msg, waveform_sel);
         end
     endtask
 
-    //-------------------------------------------------------------------------
-    // 主流程
-    //-------------------------------------------------------------------------
-    initial begin
-        int base;
+    task automatic chk_fx(input int exp_cnt, input logic [1:0] exp_mode,
+                          input string msg);
+        checks++;
+        if (fx_pulse_cnt != exp_cnt || fx_pulse_mode !== exp_mode) begin
+            $display("FAIL [%s]: fx 脉冲 %0d 次(最后一个 mode=%0d), 期望 %0d 次(mode=%0d)",
+                     msg, fx_pulse_cnt, fx_pulse_mode, exp_cnt, exp_mode);
+            errors++;
+        end else begin
+            $display("PASS [%s]: fx 脉冲 %0d 次, mode=%0d",
+                     msg, fx_pulse_cnt, fx_pulse_mode);
+        end
+    endtask
 
-        repeat (5) @(posedge clk);
+    task automatic clear_fx;
+        fx_pulse_cnt  = 0;
+        fx_pulse_mode = 2'd0;
+    endtask
+
+    initial begin
+        $display("========================================");
+        $display(" tb_key_event_decoder: 第 2 轮键盘译码");
+        $display("========================================");
+
+        key_pressed = 16'd0;
+        key_down    = 16'd0;
+        repeat (3) @(posedge clk);
         rst_n = 1'b1;
         repeat (3) @(posedge clk);
 
         //---------------------------------------------------------------------
-        // 1) 单键：NOTE_ON -> NOTE_OFF
+        // 6) 复位默认
         //---------------------------------------------------------------------
-        base = ev_count;
-        press_key(0);
-        wait_events(base + 1, 20, "single key NOTE_ON");
-        check_event(base, 2'b01, 7'd60, "K0 NOTE_ON C4");
-
-        release_key(0);
-        wait_events(base + 2, 20, "single key NOTE_OFF");
-        check_event(base + 1, 2'b10, 7'd60, "K0 NOTE_OFF C4");
-
-        //---------------------------------------------------------------------
-        // 2) 同一拍多键按下 -> 按键号从小到大
-        //---------------------------------------------------------------------
-        base = ev_count;
-        @(negedge clk);
-        key_down[0]    = 1'b1; key_pressed[0] = 1'b1;
-        key_down[2]    = 1'b1; key_pressed[2] = 1'b1;
-        key_down[4]    = 1'b1; key_pressed[4] = 1'b1;
-        @(posedge clk);
-        @(negedge clk);
-        key_pressed = '0;
-
-        wait_events(base + 3, 50, "chord NOTE_ON");
-        check_event(base + 0, 2'b01, 7'd60, "chord K0 C4");
-        check_event(base + 1, 2'b01, 7'd62, "chord K2 D4");
-        check_event(base + 2, 2'b01, 7'd64, "chord K4 E4");
-
-        //---------------------------------------------------------------------
-        // 3) 背压下 NOTE_ON 不能被后到的 NOTE_OFF 覆盖（清单第 7 项）
-        //---------------------------------------------------------------------
-        // 先把和弦释放掉（ready=1，OFF 正常送出）
-        release_key(0);
-        release_key(2);
-        release_key(4);
-        repeat (20) @(posedge clk);
-
-        //---------------------------------------------------------------------
-        // 3) 背压下 NOTE_ON 不能被后到的 NOTE_OFF 覆盖（清单第 7 项）
-        //---------------------------------------------------------------------
-        @(negedge clk);
-        event_req_ready = 1'b0;
-        repeat (5) @(posedge clk);
-        base = ev_count;
-
-        press_key(5);                  // K5 -> F4 65，进 p0
-        repeat (5) @(posedge clk);
-        release_key(5);                // NOTE_OFF 应进 p1，而不是覆盖 NOTE_ON
-        repeat (10) @(posedge clk);
-
-        if (event_req_valid !== 1'b1 || event_req_type !== 2'b01 ||
-            event_req_note !== 7'd65) begin
-            $display("FAIL: NOTE_ON lost under backpressure (head=%0d note=%0d)",
-                     event_req_type, event_req_note);
+        chk_base(7'd60, "复位 base_note=C4");
+        chk_wave(2'd0,  "复位波形=正弦");
+        checks++;
+        if (root_pitch_class !== 4'd0) begin
+            $display("FAIL [复位音级]: %0d, 期望 0", root_pitch_class);
             errors++;
         end else begin
-            $display("PASS: NOTE_ON kept at head under backpressure");
+            $display("PASS [复位音级]: 0");
         end
-
-        if (event_overflow !== 1'b0) begin
-            $display("FAIL: 2 个事件不该溢出");
-            errors++;
-        end
-
-        @(negedge clk);
-        event_req_ready = 1'b1;
-        wait_events(base + 2, 100, "backpressure drain");
-        check_event(base + 0, 2'b01, 7'd65, "backpressure NOTE_ON");
-        check_event(base + 1, 2'b10, 7'd65, "backpressure NOTE_OFF");
-
-        //---------------------------------------------------------------------
-        // 4) ALL_NOTES_OFF：优先级最高，并抑制按住键的释放事件
-        //---------------------------------------------------------------------
-        base = ev_count;
-        press_key(6);                  // K6 -> F#4 66
-        wait_events(base + 1, 20, "alloff prep");
-        check_event(base, 2'b01, 7'd66, "alloff prep NOTE_ON");
-
-        press_key(12);                 // K12 = ALL_NOTES_OFF
-        wait_events(base + 2, 20, "ALL_NOTES_OFF");
-        check_event(base + 1, 2'b11, 7'd0, "ALL_NOTES_OFF");
-
-        release_key(6);                // 不应再发 NOTE_OFF
-        repeat (30) @(posedge clk);
-        if (ev_count != base + 2) begin
-            $display("FAIL: released note after ALL_OFF produced %0d event(s)",
-                     ev_count - base - 2);
+        checks++;
+        if (active_root_mask !== 16'd0) begin
+            $display("FAIL [复位根音掩码]: 0x%04h, 期望 0", active_root_mask);
             errors++;
         end else begin
-            $display("PASS: ALL_OFF suppresses held-key NOTE_OFF");
+            $display("PASS [复位根音掩码]: 0");
         end
-        release_key(12);
 
         //---------------------------------------------------------------------
-        // 5) 八度上下限与音高限幅
+        // 1)+2) 9 个根音键：base_note 依次 60,61,62,64,65,66,68,69,70
+        //       且全程不产生 fx_req（键盘不发音符，也不切效果）
         //---------------------------------------------------------------------
-        repeat (10) @(posedge clk);
-        for (int k = 0; k < 5; k++) begin
-            press_key(13);             // 升八度，最多 +2
-            release_key(13);
+        clear_fx;
+        begin
+            int key_list [0:8];
+            int pc_list  [0:8];
+            key_list[0]=0;  pc_list[0]=0;
+            key_list[1]=1;  pc_list[1]=1;
+            key_list[2]=2;  pc_list[2]=2;
+            key_list[3]=4;  pc_list[3]=4;
+            key_list[4]=5;  pc_list[4]=5;
+            key_list[5]=6;  pc_list[5]=6;
+            key_list[6]=8;  pc_list[6]=8;
+            key_list[7]=9;  pc_list[7]=9;
+            key_list[8]=10; pc_list[8]=10;
+
+            for (int i = 0; i < 9; i++) begin
+                tap(key_list[i]);
+                chk_base(7'(60 + pc_list[i]), $sformatf("K%0d 根音", key_list[i]));
+                checks++;
+                if (root_pitch_class !== 4'(pc_list[i])) begin
+                    $display("FAIL [K%0d 音级]: %0d, 期望 %0d",
+                             key_list[i], root_pitch_class, pc_list[i]);
+                    errors++;
+                end else begin
+                    $display("PASS [K%0d 音级]: %0d", key_list[i], root_pitch_class);
+                end
+            end
         end
-        repeat (10) @(posedge clk);
-        if (octave_offset !== 4'sd2) begin
-            $display("FAIL: octave_offset=%0d, expected +2 (upper clamp)",
-                     octave_offset);
+        chk_fx(0, 2'd0, "9 个根音键不切效果");
+
+        // 回到 C 方便后面用
+        tap(0);
+        chk_base(7'd60, "回到 C");
+
+        //---------------------------------------------------------------------
+        // 3) 波形直选：K3->0, K7->1, K11->2（不循环）
+        //---------------------------------------------------------------------
+        tap(7);
+        chk_wave(2'd1, "K7 -> 管风琴(1)");
+        tap(11);
+        chk_wave(2'd2, "K11 -> 拨弦(2)");
+        tap(3);
+        chk_wave(2'd0, "K3 -> 正弦(0)");
+        tap(11);
+        chk_wave(2'd2, "K11 -> 拨弦(2)（再按 K7 之前不应回绕）");
+        tap(7);
+        chk_wave(2'd1, "K7 -> 管风琴(1)");
+        // 长按波形键仍然不变
+        tap(11, 20);
+        chk_wave(2'd2, "长按 K11 仍是拨弦(2)");
+
+        //---------------------------------------------------------------------
+        // 4) 效果键：K12->0, K13->1, K14->3（注意不是 2）
+        //---------------------------------------------------------------------
+        clear_fx;
+        tap(12);
+        chk_fx(1, 2'd0, "K12 -> 旁路(0)");
+        clear_fx;
+        tap(13);
+        chk_fx(1, 2'd1, "K13 -> 延迟(1)");
+        clear_fx;
+        tap(14);
+        chk_fx(1, 2'd3, "K14 -> 混响(3)");
+
+        //---------------------------------------------------------------------
+        // 5) K15 不产生 fx_req（复用键由 key_tap_hold 处理）
+        //---------------------------------------------------------------------
+        clear_fx;
+        tap(15);
+        chk_fx(0, 2'd0, "K15 不产生 fx_req");
+
+        //---------------------------------------------------------------------
+        // 7) 长按根音键：只锁存，不重复触发（base_note 保持）
+        //---------------------------------------------------------------------
+        tap(9, 30);
+        chk_base(7'd69, "长按 K9 -> 根音 A (69)");
+        checks++;
+        if (root_pitch_class !== 4'd9) begin
+            $display("FAIL [长按 K9 音级]: %0d, 期望 9", root_pitch_class);
             errors++;
         end else begin
-            $display("PASS: octave upper clamp +2");
-        end
-
-        for (int k = 0; k < 8; k++) begin
-            press_key(15);             // 降八度，最多 -2
-            release_key(15);
-        end
-        repeat (10) @(posedge clk);
-        if (octave_offset !== -4'sd2) begin
-            $display("FAIL: octave_offset=%0d, expected -2 (lower clamp)",
-                     octave_offset);
-            errors++;
-        end else begin
-            $display("PASS: octave lower clamp -2");
-        end
-
-        // -2 八度时 K0 = 60 - 24 = 36
-        base = ev_count;
-        press_key(0);
-        wait_events(base + 1, 20, "octave -2 NOTE_ON");
-        check_event(base, 2'b01, 7'd36, "K0 at octave -2 -> 36");
-        release_key(0);
-        wait_events(base + 2, 20, "octave -2 NOTE_OFF");
-
-        // 回到 0 八度
-        for (int k = 0; k < 2; k++) begin
-            press_key(13);
-            release_key(13);
-        end
-        repeat (10) @(posedge clk);
-        if (octave_offset !== 4'sd0) begin
-            $display("FAIL: octave_offset=%0d, expected 0", octave_offset);
-            errors++;
+            $display("PASS [长按 K9 音级]: 9");
         end
 
         //---------------------------------------------------------------------
-        // 6) 波形循环 0 -> 1 -> 2 -> 0（WAVEFORM_MAX_SEL=2）
-        //---------------------------------------------------------------------
-        if (waveform_sel !== 2'b00) begin
-            $display("FAIL: waveform_sel reset value=%0d", waveform_sel);
-            errors++;
-        end
-        press_key(14); release_key(14);
-        repeat (5) @(posedge clk);
-        if (waveform_sel !== 2'b01) begin
-            $display("FAIL: waveform_sel=%0d after 1 press", waveform_sel);
-            errors++;
-        end
-        press_key(14); release_key(14);
-        repeat (5) @(posedge clk);
-        if (waveform_sel !== 2'b10) begin
-            $display("FAIL: waveform_sel=%0d after 2 presses", waveform_sel);
-            errors++;
-        end
-        press_key(14); release_key(14);
-        repeat (5) @(posedge clk);
-        if (waveform_sel !== 2'b00) begin
-            $display("FAIL: waveform_sel=%0d after 3 presses", waveform_sel);
-            errors++;
-        end else begin
-            $display("PASS: waveform cycles 0->1->2->0");
-        end
-
-        //---------------------------------------------------------------------
-        // 7) 同键 3 个事件积压（2 槽位）-> overflow 置位，在队事件不丢
+        // 按住根音键时 active_root_mask 应指示对应键
         //---------------------------------------------------------------------
         @(negedge clk);
-        event_req_ready = 1'b0;
-        repeat (5) @(posedge clk);
-        base = ev_count;
-
-        press_key(7);                  // K7 -> G4 67
-        repeat (3) @(posedge clk);
-        release_key(7);                // OFF
-        repeat (3) @(posedge clk);
-        press_key(7);                  // 第三个事件：槽位满
-        repeat (5) @(posedge clk);
-
-        if (event_overflow !== 1'b1) begin
-            $display("FAIL: third event for one key did not raise overflow");
+        key_pressed[5] = 1'b1;
+        key_down[5]    = 1'b1;
+        repeat (2) @(posedge clk);
+        checks++;
+        if (active_root_mask !== 16'h0020) begin
+            $display("FAIL [按住 K5]: active_root_mask=0x%04h, 期望 0x0020",
+                     active_root_mask);
             errors++;
         end else begin
-            $display("PASS: slot overflow reported for a 3rd event");
+            $display("PASS [按住 K5]: active_root_mask=0x0020");
         end
-
-        if (event_req_valid !== 1'b1 || event_req_type !== 2'b01 ||
-            event_req_note !== 7'd67) begin
-            $display("FAIL: queued head damaged after overflow (type=%0d note=%0d)",
-                     event_req_type, event_req_note);
-            errors++;
-        end
-
         @(negedge clk);
-        event_req_ready = 1'b1;
-        wait_events(base + 2, 100, "overflow drain");
-        check_event(base + 0, 2'b01, 7'd67, "overflow NOTE_ON kept");
-        check_event(base + 1, 2'b10, 7'd67, "overflow NOTE_OFF kept");
+        key_pressed[5] = 1'b0;
+        key_down[5]    = 1'b0;
+        repeat (2) @(posedge clk);
 
+        // 波形键/效果键不属于根音键，不应出现在 active_root_mask 里
+        @(negedge clk);
+        key_pressed[12] = 1'b1;
+        key_down[12]    = 1'b1;
+        key_pressed[3]  = 1'b1;
+        key_down[3]     = 1'b1;
+        repeat (2) @(posedge clk);
+        checks++;
+        if (active_root_mask !== 16'd0) begin
+            $display("FAIL [波形/效果键不属于根音]: active_root_mask=0x%04h, 期望 0",
+                     active_root_mask);
+            errors++;
+        end else begin
+            $display("PASS [波形/效果键不属于根音]: active_root_mask=0");
+        end
+        @(negedge clk);
+        key_pressed = 16'd0;
+        key_down    = 16'd0;
+        repeat (2) @(posedge clk);
+
+        $display("========================================");
         if (errors == 0) begin
-            $display("TEST PASSED: tb_key_event_decoder");
+            $display("TEST PASSED: tb_key_event_decoder (%0d checks)", checks);
         end else begin
             $display("TEST FAILED: tb_key_event_decoder, %0d error(s)", errors);
         end
@@ -355,7 +282,7 @@ module tb_key_event_decoder;
     end
 
     initial begin
-        #200_000;
+        #1000000;
         $display("TEST TIMEOUT: tb_key_event_decoder");
         $finish;
     end

@@ -75,15 +75,27 @@ module tang_nano20k_top (
     logic [11:0] pitch_bend;
     logic [1:0]  waveform_sel;
 
+    // 第 2 轮新增：cfg 配置总线（效果/颤音参数）
+    logic        cfg_valid;
+    logic        cfg_write;
+    logic [7:0]  cfg_addr;
+    logic [31:0] cfg_wdata;
+    logic        cfg_ready;
+    logic [31:0] cfg_rdata;
+
     logic        adc_sda_oe;
     logic        adc_sda_i;
 
     assign adc_sda   = adc_sda_oe ? 1'b0 : 1'bz;
     assign adc_sda_i = adc_sda;
 
+    // audio_core_expr 未接入前：cfg_ready 常量置 1（序列瞬间写完、无副作用）
+    assign cfg_ready = 1'b1;
+    assign cfg_rdata = 32'd0;
+
     input_top #(
-        .SYS_CLK_HZ (SYS_CLK_HZ),
-        .MATRIX_MODE (1)          // 1=矩阵选根音/音区，5 路 FSR 触发
+        .SYS_CLK_HZ (SYS_CLK_HZ)
+        // 第 2 轮起没有 MATRIX_MODE：键盘只选根音/波形/效果，不发声
     ) u_input_top (
         .sys_clk        (sys_clk),
         .rst_n          (rst_n),
@@ -102,6 +114,12 @@ module tang_nano20k_top (
         .expression     (expression),
         .pitch_bend     (pitch_bend),
         .waveform_sel   (waveform_sel),
+        .cfg_valid      (cfg_valid),
+        .cfg_write      (cfg_write),
+        .cfg_addr       (cfg_addr),
+        .cfg_wdata      (cfg_wdata),
+        .cfg_ready      (cfg_ready),
+        .cfg_rdata      (cfg_rdata),
         .test_mode      (test_mode),
         .test_pattern   (test_pattern),
         .key_down       (),
@@ -112,7 +130,6 @@ module tang_nano20k_top (
         .adc_valid      (),
         .adc_bus_error  (),
         .input_overflow (),
-        .octave_debug   (),
         .piezo_hit_debug    (),
         .piezo_active_debug (),
         .base_note_debug    (),

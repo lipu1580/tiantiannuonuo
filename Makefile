@@ -19,8 +19,9 @@ VERILATOR ?= verilator
 BUILD     := build
 COMMON    := rtl/common
 PKG       := $(COMMON)/packages.sv
-RTL_INPUT := $(wildcard rtl/input/*.sv) $(wildcard rtl/input/top/*.sv)
+RTL_INPUT := $(wildcard rtl/input/*.sv)
 RTL_AUDIO := $(wildcard rtl/audio/*.sv) $(wildcard rtl/audio_out/*.sv)
+RTL_TOP   := $(wildcard rtl/top/*.sv)
 RTL_ALL   := $(RTL_INPUT) $(RTL_AUDIO)
 RTL       := $(RTL_ALL)
 MODEL     := sim/ads7830_model.sv
@@ -29,13 +30,15 @@ INC       := -I$(COMMON)
 TBS := \
 	tb_key_scan \
 	tb_key_debounce \
+	tb_note_map \
+	tb_key_tap_hold \
+	tb_cfg_master \
 	tb_key_event_decoder \
 	tb_adc_ads7830 \
 	tb_fsr_filter \
 	tb_expression_mapper \
 	tb_event_queue \
 	tb_fsr_trigger \
-	tb_matrix_config \
 	tb_input_event_stub \
 	tb_input_top
 
@@ -57,9 +60,9 @@ VTB := \
 	tb_event_router \
 	tb_voice_manager
 
-.PHONY: all lint lint-audio sim sim-audio sim-v sim-all clean help
+.PHONY: all lint lint-audio lint-top lint-all sim sim-audio sim-v sim-all clean help
 
-all: lint sim
+all: lint lint-audio lint-top sim
 
 help:
 	@echo "make lint         Verilator lint"
@@ -74,6 +77,13 @@ lint:
 lint-audio:
 	$(VERILATOR) --lint-only -Wall -Wno-fatal -Wno-PINCONNECTEMPTY \
 		$(INC) --top-module audio_core $(PKG) $(RTL_AUDIO)
+
+# 板级顶层：把 input / audio / audio_out 全部接起来检查（真正的"能不能综合"前哨）
+lint-top:
+	$(VERILATOR) --lint-only -Wall -Wno-fatal -Wno-PINCONNECTEMPTY \
+		$(INC) --top-module tang_nano20k_top $(PKG) $(RTL_ALL) $(RTL_TOP)
+
+lint-all: lint lint-audio lint-top
 
 $(BUILD):
 	mkdir -p $(BUILD)

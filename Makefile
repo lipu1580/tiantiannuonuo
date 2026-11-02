@@ -47,6 +47,7 @@ AUDIO_TBS := \
 	tb_adsr \
 	tb_dds_oscillator \
 	tb_note_freq_lut \
+	tb_pitch_bend_lut \
 	tb_pcm_stream_adapter \
 	tb_sample_tick_gen \
 	tb_section2 \

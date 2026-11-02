@@ -59,5 +59,163 @@ module audio_core_expr #(
     output logic [VOICE_COUNT-1:0]           voice_active
 );
 
+    logic test_event_valid, routed_event_valid, routed_event_ready, test_event_ready;
+    logic [1:0] test_event_type, routed_event_type;
+    logic [NOTE_W-1:0] test_event_note_id, routed_event_note_id;
+    logic [7:0] test_event_velocity, routed_event_velocity;
+    logic [15:0]                       voice_envelope [0:VOICE_COUNT-1];
+    logic [VOICE_COUNT-1:0]            voice_start;
+    logic [VOICE_COUNT-1:0]            voice_release;
+    logic [NOTE_W-1:0]                 voice_note_id [0:VOICE_COUNT-1];
+    logic [7:0]                        voice_velocity [0:VOICE_COUNT-1];
+    logic signed [OUTPUT_W-1:0]                voice_sample [0:VOICE_COUNT-1];
+    logic [VOICE_COUNT-1:0]            voice_sample_valid;
+    logic                              mixer_sample_valid;
+    logic signed [OUTPUT_W-1:0]        mixed_sample;
+    logic                              mixed_valid;
+    logic [7:0]                        expression_reg;
+    logic [11:0]                       pitch_bend_reg;
+    logic [1:0]                        waveform_sel_reg;
+
+    assign mixer_sample_valid = &voice_sample_valid;
+
+    audio_test_source #(
+        .NOTE_W     (NOTE_W /* default 7 */),
+        .SAMPLE_RATE(SAMPLE_RATE /* default 48_000 */)
+     ) audio_test_source (
+        .sys_clk       (sys_clk),
+        .rst_n         (rst_n),
+        .audio_ce      (audio_ce),
+        .enable        (test_mode),
+        .test_pattern  (test_pattern),
+        .event_valid   (test_event_valid),
+        .event_ready   (test_event_ready),
+        .event_type    (test_event_type),
+        .event_note_id (test_event_note_id),
+        .event_velocity(test_event_velocity)
+    );
+
+    event_router #(
+        .NOTE_W(NOTE_W /* default 7 */)
+     ) event_router (
+        .sys_clk              (sys_clk),
+        .rst_n                (rst_n),
+        .test_mode            (test_mode),
+        .event_valid          (event_valid),
+        .event_ready          (event_ready),
+        .event_type           (event_type),
+        .event_note_id        (event_note_id),
+        .event_velocity       (event_velocity),
+        .test_event_valid     (test_event_valid),
+        .test_event_ready     (test_event_ready),
+        .test_event_type      (test_event_type),
+        .test_event_note_id   (test_event_note_id),
+        .test_event_velocity  (test_event_velocity),
+        .routed_event_valid   (routed_event_valid),
+        .routed_event_ready   (routed_event_ready),
+        .routed_event_type    (routed_event_type),
+        .routed_event_note_id (routed_event_note_id),
+        .routed_event_velocity(routed_event_velocity)
+    );
+
+    voice_manager #(
+        .VOICE_COUNT(VOICE_COUNT /* default 4 */),
+        .NOTE_W     (NOTE_W /* default 7 */)
+     ) voice_manager (
+        .sys_clk           (sys_clk),
+        .rst_n             (rst_n),
+        .event_valid       (routed_event_valid),
+        .event_ready       (routed_event_ready),
+        .event_type        (routed_event_type),
+        .event_note_id     (routed_event_note_id),
+        .event_velocity    (routed_event_velocity),
+        .voice_active      (voice_active),
+        .voice_envelope    (voice_envelope),
+        .voice_start       (voice_start),
+        .voice_release     (voice_release),
+        .voice_note_id     (voice_note_id),
+        .voice_velocity    (voice_velocity),
+        .active_voice_count(active_voice_count)
+    );
+
+    generate
+    for (genvar i = 0; i < VOICE_COUNT; i++) begin : gen_voice
+        voice #(
+            .NOTE_W      (NOTE_W),
+            .PHASE_W     (PHASE_W),
+            .SAMPLE_W    (SAMPLE_W),
+            .OUTPUT_W    (VOICE_W),
+            .SAMPLE_RATE (SAMPLE_RATE),
+            .WAVE_ADDR_W (WAVE_ADDR_W),
+            .ATTACK_STEP   (ATTACK_STEP),
+            .DECAY_STEP    (DECAY_STEP),
+            .SUSTAIN_LEVEL (SUSTAIN_LEVEL),
+            .RELEASE_STEP  (RELEASE_STEP)
+        ) u_voice (
+            .sys_clk        (sys_clk),
+            .rst_n          (rst_n),
+            .audio_ce       (audio_ce),
+
+            .note_on        (voice_start[i]),
+            .note_off       (voice_release[i]),
+            .note_id        (voice_note_id[i]),
+            .velocity       (voice_velocity[i]),
+            .expression     (expression_reg),
+            .pitch_bend     (pitch_bend_reg),
+            .waveform_sel   (waveform_sel_reg),
+
+            .voice_sample   (voice_sample[i]),
+            .sample_valid   (voice_sample_valid[i]),
+            .active         (voice_active[i]),
+            .envelope_value (voice_envelope[i])
+        );
+        end
+    endgenerate
+
+    mixer #(
+        .VOICE_COUNT(VOICE_COUNT /* default 4 */),
+        .VOICE_W    (VOICE_W /* default 24 */),
+        .OUTPUT_W   (OUTPUT_W /* default 24 */)
+     ) mixer (
+        .sys_clk     (sys_clk),
+        .rst_n       (rst_n),
+        .audio_ce    (audio_ce),
+        .sample_valid(mixer_sample_valid),
+        .voice_sample(voice_sample),
+        .master_gain (MASTER_GAIN),
+        .mixed_sample(mixed_sample),
+        .mixed_valid (mixed_valid)
+    );
+
+    pcm_stream_adapter #(
+        .INPUT_W   (INPUT_W /* default 24 */),
+        .SAMPLE_W  (SAMPLE_W /* default 16 */),
+        .FIFO_DEPTH(PCM_FIFO_DEPTH /* default 4 */),
+        .MIX_SHIFT (0) // mixer 已包含四声部的 /4 衰减，这里只限幅。
+     ) pcm_stream_adapter (
+        .sys_clk     (sys_clk),
+        .rst_n       (rst_n),
+        .sample_valid(mixed_valid),
+        .mixed_sample(mixed_sample),
+        .pcm_valid   (pcm_valid),
+        .pcm_ready   (pcm_ready),
+        .pcm_left    (pcm_left),
+        .pcm_right   (pcm_right),
+        .overflow    ()
+    );
+
+    always_ff @(posedge sys_clk) begin
+    if (!rst_n) begin
+        expression_reg   <= 8'd255;
+        pitch_bend_reg   <= 12'd2048;
+        waveform_sel_reg <= 2'd0;
+    end
+    else if (expr_valid) begin
+        expression_reg   <= expression;
+        pitch_bend_reg   <= pitch_bend;
+        waveform_sel_reg <= waveform_sel;
+    end
+end
+
     // 仅接口骨架：输出尚无驱动，不可作为可播放的核心使用。
 endmodule

@@ -31,6 +31,7 @@ module voice #(
 );
     logic signed [PHASE_W-1:0] waveform_sample;
     logic [PHASE_W-1:0] phase_increment;
+    logic [PHASE_W-1:0] mid_out_increment;
     logic [NOTE_W-1:0] lock_note_id;
 
     note_freq_lut # (
@@ -40,7 +41,13 @@ module voice #(
     ) DUT0 (
         .note_id (lock_note_id),
         .pitch_bend (pitch_bend),
-        .phase_increment (phase_increment)
+        .phase_increment (mid_out_increment)
+    );
+
+    pitch_bend_lut pitch_bend_lut (
+        .in_phase_increment(mid_out_increment),
+        .pitch_bend        (pitch_bend),
+        .phase_increment   (phase_increment)
     );
 
     dds_oscillator # (

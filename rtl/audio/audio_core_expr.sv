@@ -58,6 +58,12 @@ module audio_core_expr #(
     output logic [$clog2(VOICE_COUNT+1)-1:0] active_voice_count,
     output logic [VOICE_COUNT-1:0]           voice_active
 );
+    localparam int  TRILL_DEP_ADDR = 'h24,
+                    TRILL_FREQ_ADDR = 'h28,
+                    EFF_MODE_ADDR = 'h2C,
+                    WET_RATIO_ADDR = 'h30,
+                    DELAY_SAMPLE_CNT_ADDR = 'h34,
+                    FEBC_RATIO_ADDR = 'h38;
 
     logic test_event_valid, routed_event_valid, routed_event_ready, test_event_ready;
     logic [1:0] test_event_type, routed_event_type;

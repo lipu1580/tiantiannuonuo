@@ -40,19 +40,22 @@ ADS7830 ADC ──┘                 └► expr_*  (expression/pitch_bend/wave
 │       ├── note_map.sv             # 键号 -> MIDI 音符/功能键
 │       ├── key_event_decoder.sv    # 边沿 -> 标准事件
 │       ├── event_queue.sv          # 事件 FIFO(valid/ready)
-│       ├── adc_ads7830.sv          # ADS7830 I2C 驱动
-│       ├── piezo_peak.sv           # 5 路压电峰值/触发/NOTE_OFF
+│       ├── adc_ads7830.sv          # ADS7830 I2C 驱动（通道编码/总线恢复）
+│       ├── fsr_trigger.sv          # 5 路 FSR 阈值/力度/释放/事件
 │       ├── fsr_filter.sv           # FSR 滤波/门限/力度
 │       ├── expression_mapper.sv    # 电位器 -> pitch_bend
-│       └── input_event_stub.sv     # 无硬件测试事件源
+│       ├── input_event_stub.sv     # 无硬件测试事件源
+│       └── piezo_peak.sv           # 旧压电方案遗留（已由 fsr_trigger 替代）
 ├── sim/
 │   ├── ads7830_model.sv            # ADS7830 I2C 从机模型
 │   ├── tb_key_scan.sv
 │   ├── tb_key_debounce.sv
+│   ├── tb_key_event_decoder.sv
 │   ├── tb_adc_ads7830.sv
 │   ├── tb_fsr_filter.sv
+│   ├── tb_fsr_trigger.sv           # 5 路 FSR 触发/释放/长按/背压
+│   ├── tb_expression_mapper.sv
 │   ├── tb_event_queue.sv
-│   ├── tb_piezo_peak.sv            # 5 路压电触发/自动 NOTE_OFF
 │   ├── tb_matrix_config.sv         # MATRIX_MODE=1 配置模式
 │   ├── tb_input_event_stub.sv
 │   └── tb_input_top.sv             # 系统级联调仿真
@@ -65,6 +68,7 @@ ADS7830 ADC ──┘                 └► expr_*  (expression/pitch_bend/wave
 │   ├── member2_scope.md            # 成员 2 最终职责、接口与待实现项
 │   ├── remaining_tasks.md          # 未实现/未覆盖项盘点（P0/P1/P2）
 │   ├── 仍未完成的功能详情.md        # 逐项：现状/目标/缺失/验收/测试
+│   ├── review_fix_record.md        # 评审清单 20 项的处理记录
 │   └── test_record.md              # 仿真记录与硬件测试清单
 ├── Makefile
 └── README.md
@@ -83,7 +87,8 @@ make run-tb_input_top   # 只运行系统级仿真
 make clean
 ```
 
-当前回归结果：9 个 testbench 全部 `TEST PASSED`。
+当前回归结果：11 个 testbench 全部 `TEST PASSED`（`make sim` 会检查仿真器退出码，
+`$fatal` 不会再被掩盖成通过）。
 
 ---
 
@@ -124,6 +129,9 @@ make clean
 | `piezo_hit_debug[4:0]` | 5 路峰值是否超过阈值 |
 | `piezo_active_debug[4:0]` | 5 路是否正在发声 |
 | `base_note_debug[6:0]` | 当前根音（含八度） |
+| `key_ghost_debug` | 2x2 内 ≥3 键：存在鬼键组合（建议每键串二极管） |
+| `key_conflict_debug` | 同列跨行 ≥2 键：行驱动争用（同上） |
+| `adc_timeout_debug` | ADC 采样请求看门狗超时（总线钳死/从机无响应） |
 | `test_mode` | 1=使用内部测试事件源 |
 | `test_pattern[1:0]` | 测试序列选择 |
 
@@ -175,6 +183,18 @@ assign adc_sda_i = adc_sda;
    用成员 2 的固定序列时前者置 1、后者置 0；用成员 1 自己的测试音源时相反。
    详见 `docs/integration_guide.md` 第 3.1 节。
 
+7. **ADS7830 通道号是物理通道号，命令字里的 `C2:C0` 不是二进制顺序。**
+   驱动内部按数据手册编码（`C2:C0 = {ch[0],ch[2],ch[1]}`），
+   I²C 实际 SCL ≈375 kHz（自动分频，满足 Fast Mode 的 400 kHz 与 `t_LOW`≥1.3 us）。
+
+8. **`waveform_sel` 默认只会是 0（正弦）。**
+   成员 1 的 `waveform_rom` 目前只实现正弦波，切到 1/2 会静音，
+   因此 `project_params_pkg::WAVEFORM_MAX_SEL` 默认 0；波表补齐后改成 2 即可。
+
+9. **事件不会因下游背压而丢。**
+   每键 / 每触发通道有 2 个待发槽位，`input_overflow` 只在真的丢过事件时为 1。
+   `test_mode` 切换会先交付在途事件、再补 `ALL_NOTES_OFF`，不会撤销事件。
+
 ---
 
 ## 6. 当前状态
@@ -185,14 +205,22 @@ assign adc_sda_i = adc_sda;
 - [x] FSR → ADS7830 → 力度，按下瞬间锁存
 - [x] 电位器 → pitch_bend
 - [x] 四键和弦、背压保持、ALL_OFF 释放抑制
-- [x] 5 路压电峰值/阈值/力度/自动 NOTE_OFF/峰值放电
-- [x] 7 通道 ADC 轮询（CH2~CH6 压电、CH0 FSR、CH1 电位器）
+- [x] 5 路 FSR 阈值/迟滞/力度/电平释放/自动 NOTE_OFF/防重复
+- [x] 7 通道 ADC 轮询（CH2~CH6 FSR 触发、CH0 FSR 表情、CH1 电位器）
 - [x] 无硬件 `input_event_stub` 演示序列
-- [x] 9 个 testbench 全部通过
+- [x] ADS7830 通道编码修正 + 总线超时/恢复（评审清单 1/16/17）
+- [x] 长按不重触发、ALL_OFF 后需松手、每键/每路 2 槽位不丢事件（清单 3/4/7）
+- [x] `test_mode` 切换握手 + 测试序列延迟重启（清单 5/6）
+- [x] 矩阵鬼键/同列争用告警（清单 18，彻底解决需硬件加二极管）
+- [x] 回归脚本检查仿真器退出码（清单 20）
+- [x] 11 个 testbench 全部通过
 - [ ] 实物接线与引脚约束（成员 3）
 - [ ] 与成员 1 `audio_core` 上板联调（当前阶段先做 4 voice）
 - [ ] 端到端延迟实测
-- [ ] ADC 总线超时恢复、电位器中心死区、FSR 校准（P1）
+- [ ] FSR 零点/满量程标定（P1）
+- [ ] 每键串 1N4148（硬件，保证任意 4 键和弦）
+
+逐项对照评审清单的修复记录见 `docs/review_fix_record.md`。
 
 > 当前阶段按 `VOICE_COUNT=4` 联调；5 指同时触发/扫弦的 8 voice 作为后续升级点，
 > `audio_core.VOICE_COUNT` 必须参数化，不能写死。

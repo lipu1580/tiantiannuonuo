@@ -35,6 +35,7 @@ module tb_fsr_trigger;
     logic [4:0] hit_debug;
     logic [4:0] active_debug;
     logic [39:0] level_debug;
+    logic        event_overflow;
 
     logic       event_req_valid;
     logic       event_req_ready = 1'b1;
@@ -76,7 +77,8 @@ module tb_fsr_trigger;
         .event_req_velocity (event_req_velocity),
         .hit_debug          (hit_debug),
         .active_debug       (active_debug),
-        .level_debug        (level_debug)
+        .level_debug        (level_debug),
+        .event_overflow     (event_overflow)
     );
 
     //-------------------------------------------------------------------------
@@ -205,7 +207,7 @@ module tb_fsr_trigger;
         check_event(base + 1, 2'b10, 7'd60, "P0 NOTE_OFF C4");
 
         //---------------------------------------------------------------------
-        // 5) 防重复触发窗口：触发后 RETRIGGER_MS=30 拍内不再触发
+        // 5) 防重复触发窗口
         //    先完成一次“触发 -> 快速松开”，此时仍在窗口内
         //---------------------------------------------------------------------
         repeat (40) @(posedge clk);          // 等上一轮窗口结束
@@ -226,14 +228,60 @@ module tb_fsr_trigger;
             $display("PASS: retrigger window blocks early trigger");
         end
 
-        // 窗口结束后应能再次触发
-        repeat (40) @(posedge clk);
+        //---------------------------------------------------------------------
+        // 5b) 窗口到期但手指仍压着（电平一直是 150）-> 不能自动重新触发
+        //     旧实现在 retrig_timer 到期时无条件 armed<=1，长按就会每
+        //     RETRIGGER_MS 重复发一次 NOTE_ON（评审清单第 3 项）。
+        //---------------------------------------------------------------------
+        repeat (40) @(posedge clk);          // 窗口肯定已经结束
+        send_burst(CH_BASE, 8'd150, 5);      // 仍然保持按压
+        repeat (20) @(posedge clk);
+        if (ev_count != base + 2) begin
+            $display("FAIL: sustained press re-armed after window (%0d extra)",
+                     ev_count - base - 2);
+            errors++;
+        end else begin
+            $display("PASS: sustained press does not re-arm after window");
+        end
+
+        // 真实松开后才允许再次触发
+        send_burst(CH_BASE, 8'd0, 3);
+        repeat (10) @(posedge clk);
         send_sample(CH_BASE, 8'd150);
-        wait_events(base + 3, 50, "P0 retrigger after window");
+        wait_events(base + 3, 50, "P0 retrigger after real release");
         check_event(base + 2, 2'b01, 7'd60, "P0 retrigger C4");
         send_burst(CH_BASE, 8'd0, 3);        // 松开
         wait_events(base + 4, 50, "P0 NOTE_OFF after retrigger");
         check_event(base + 3, 2'b10, 7'd60, "P0 NOTE_OFF after retrigger");
+
+        //---------------------------------------------------------------------
+        // 5c) 长按期间切换根音：NOTE_OFF 必须用触发时锁存的音符（C4），
+        //     不能因为根音变成 D4 就漏掉 C4 的 OFF（评审清单第 3 项后半）
+        //---------------------------------------------------------------------
+        repeat (40) @(posedge clk);
+        base = ev_count;
+        send_sample(CH_BASE, 8'd150);            // C4
+        wait_events(base + 1, 50, "base change NOTE_ON");
+        check_event(base, 2'b01, 7'd60, "base change NOTE_ON C4");
+
+        @(negedge clk);
+        base_note = 7'd62;                       // D4
+        repeat (50) @(posedge clk);              // 长按，跨过防重复窗口
+        send_burst(CH_BASE, 8'd150, 3);          // 仍在按压
+        if (ev_count != base + 1) begin
+            $display("FAIL: root change while held produced %0d extra event(s)",
+                     ev_count - base - 1);
+            errors++;
+        end else begin
+            $display("PASS: root change while held does not retrigger");
+        end
+
+        send_burst(CH_BASE, 8'd0, 3);            // 松开
+        wait_events(base + 2, 50, "base change NOTE_OFF");
+        check_event(base + 1, 2'b10, 7'd60, "base change NOTE_OFF keeps C4");
+        @(negedge clk);
+        base_note = 7'd60;                       // 还原根音 C4
+        repeat (20) @(posedge clk);
 
         //---------------------------------------------------------------------
         // 6) 5 路独立音符映射：+0/+2/+4/+7/+9
@@ -296,6 +344,78 @@ module tb_fsr_trigger;
             $display("FAIL: active_debug=%b, expected all 0", active_debug);
             errors++;
         end
+
+        //---------------------------------------------------------------------
+        // 8b) ALL_NOTES_OFF 之后手指仍压着：不能立刻重新发声
+        //     旧实现在 all_off 时把 armed 全部置 1，下一个高电平样本就会
+        //     重新触发 NOTE_ON —— 按了“全部释放”却停不下来（清单第 4 项）。
+        //---------------------------------------------------------------------
+        repeat (40) @(posedge clk);
+        base = ev_count;
+        send_sample(CH_BASE + 3'd3, 8'd150);   // P3 -> 67
+        wait_events(base + 1, 50, "ALL_OFF hold pre NOTE_ON");
+        check_event(base, 2'b01, 7'd67, "ALL_OFF hold pre NOTE_ON G4");
+
+        @(negedge clk);
+        all_off = 1'b1;
+        @(negedge clk);
+        all_off = 1'b0;
+
+        // 手指没有松开：持续送高电平样本，必须保持静音
+        send_burst(CH_BASE + 3'd3, 8'd150, 10);
+        repeat (60) @(posedge clk);
+        if (ev_count != base + 1) begin
+            $display("FAIL: held FSR re-triggered after ALL_NOTES_OFF (%0d extra)",
+                     ev_count - base - 1);
+            errors++;
+        end else begin
+            $display("PASS: held FSR stays silent after ALL_NOTES_OFF");
+        end
+
+        // 松开后重新按下：应该能正常触发
+        send_burst(CH_BASE + 3'd3, 8'd0, 3);
+        repeat (10) @(posedge clk);
+        send_sample(CH_BASE + 3'd3, 8'd150);
+        wait_events(base + 2, 60, "ALL_OFF then re-press NOTE_ON");
+        check_event(base + 1, 2'b01, 7'd67, "ALL_OFF then re-press G4");
+        send_burst(CH_BASE + 3'd3, 8'd0, 3);
+        wait_events(base + 3, 60, "ALL_OFF then re-press NOTE_OFF");
+        check_event(base + 2, 2'b10, 7'd67, "ALL_OFF then re-press NOTE_OFF");
+        repeat (20) @(posedge clk);
+
+        //---------------------------------------------------------------------
+        // 9) 背压：event_req_ready=0 时 NOTE_ON 与 NOTE_OFF 都不能被覆盖
+        //    （评审清单第 7 项：单槽位会丢失尚未发出的 NOTE_ON）
+        //---------------------------------------------------------------------
+        event_req_ready = 1'b0;
+        repeat (5) @(posedge clk);
+        base = ev_count;
+
+        send_sample(CH_BASE, 8'd150);            // NOTE_ON 进 p0
+        repeat (5) @(posedge clk);
+        send_burst(CH_BASE, 8'd0, 3);            // 松开 -> NOTE_OFF 进 p1
+        repeat (10) @(posedge clk);
+
+        if (event_req_valid !== 1'b1 ||
+            event_req_type !== 2'b01 || event_req_note !== 7'd60) begin
+            $display("FAIL: pending NOTE_ON lost under backpressure (t=%0d n=%0d)",
+                     event_req_type, event_req_note);
+            errors++;
+        end else begin
+            $display("PASS: NOTE_ON still at head under backpressure");
+        end
+
+        if (event_overflow !== 1'b0) begin
+            $display("FAIL: 2 个事件不该溢出 (event_overflow=1)");
+            errors++;
+        end
+
+        @(negedge clk);
+        event_req_ready = 1'b1;                  // 放开背压，两个事件依次送出
+        wait_events(base + 2, 200, "backpressure drain");
+        check_event(base, 2'b01, 7'd60, "backpressure NOTE_ON");
+        check_event(base + 1, 2'b10, 7'd60, "backpressure NOTE_OFF");
+        repeat (20) @(posedge clk);
 
         //---------------------------------------------------------------------
         // 汇总

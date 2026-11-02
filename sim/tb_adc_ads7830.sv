@@ -68,7 +68,9 @@ module tb_adc_ads7830;
         @(negedge clk);
         sample_req      = 1'b1;
         adc_channel_req = ch;
-        @(negedge clk);
+        // 请求电平要覆盖至少一个 quarter tick（QDIV=2 -> 2 个时钟），
+        // 否则状态机可能正好错过这个脉冲。
+        repeat (4) @(negedge clk);
         sample_req      = 1'b0;
 
         got      = 1'b0;
@@ -100,8 +102,50 @@ module tb_adc_ads7830;
         end
     endtask
 
+    //-------------------------------------------------------------------------
+    // 发起一次请求，期望“不产生样本且报总线错误”
+    //   用于 NACK / SDA 钳死 / 超时等错误路径。
+    //-------------------------------------------------------------------------
+    task automatic expect_fault(input logic [2:0] ch, input string msg);
+        int  guard;
+        logic got_valid;
+        logic got_error;
+
+        @(negedge clk);
+        sample_req      = 1'b1;
+        adc_channel_req = ch;
+        repeat (4) @(negedge clk);
+        sample_req      = 1'b0;
+
+        got_valid = 1'b0;
+        got_error = 1'b0;
+
+        for (guard = 0; guard < 6000; guard++) begin
+            @(posedge clk);
+            if (sample_valid) got_valid = 1'b1;
+            if (bus_error)    got_error = 1'b1;
+            if (got_valid)    guard = 6000;
+        end
+
+        if (got_valid) begin
+            $display("FAIL [%s]: fake sample_valid (data=0x%02h ch=%0d)", 
+                     msg, sample_data, sample_channel);
+            errors++;
+        end else if (!got_error) begin
+            $display("FAIL [%s]: no bus_error reported", msg);
+            errors++;
+        end else begin
+            $display("PASS [%s]: bus_error raised, no sample produced", msg);
+        end
+
+        // 等状态机回到空闲再继续
+        repeat (20) @(posedge clk);
+    endtask
+
     initial begin
-        // 预置各通道 ADC 值
+        // 预置各通道 ADC 值：每个通道给不同的值，才能验证通道编码是否正确。
+        // 旧的模型 + 旧的驱动把 C2:C0 直接当通道号，两边错得一样，所以
+        // “请求 CH n 读到 adc_val[n]”这件事其实没被真正验证过。
         u_model.adc_val[0] = 8'hA5;
         u_model.adc_val[1] = 8'h3C;
         u_model.adc_val[2] = 8'h00;
@@ -121,6 +165,47 @@ module tb_adc_ads7830;
         do_sample(3'd4, 8'hFF, "channel 4");
         do_sample(3'd7, 8'h01, "channel 7");
         do_sample(3'd0, 8'hA5, "channel 0 repeat");
+
+        //---------------------------------------------------------------------
+        // 通道编码全覆盖：0~7 逐个请求，必须各拿到自己通道的值
+        //   ADS7830 单端编码不是二进制顺序，漏掉其中任何一对都会串位：
+        //   CH1<->CH2、CH3<->CH4、CH5<->CH6 是两两互换的高风险区。
+        //---------------------------------------------------------------------
+        do_sample(3'd0, 8'hA5, "enc CH0");
+        do_sample(3'd1, 8'h3C, "enc CH1");
+        do_sample(3'd2, 8'h00, "enc CH2");
+        do_sample(3'd3, 8'h5A, "enc CH3");
+        do_sample(3'd4, 8'hFF, "enc CH4");
+        do_sample(3'd5, 8'h81, "enc CH5");
+        do_sample(3'd6, 8'h7E, "enc CH6");
+        do_sample(3'd7, 8'h01, "enc CH7");
+
+        //---------------------------------------------------------------------
+        // 错误路径 1：从机不应答（NACK）
+        //   必须报 bus_error，且不能产生 sample_valid。
+        //---------------------------------------------------------------------
+        u_model.nack_en = 1'b1;
+        expect_fault(3'd1, "NACK path");
+        u_model.nack_en = 1'b0;
+
+        // 恢复后应重新正常工作
+        do_sample(3'd1, 8'h3C, "after NACK recovery");
+
+        //---------------------------------------------------------------------
+        // 错误路径 2：SDA 被持续拉低（总线钳死）
+        //   旧实现在这种情况会给出 sample_valid=1、data=0、bus_error=0 —— 
+        //   伪造的成功采样。现在必须报错且不出样本。
+        //---------------------------------------------------------------------
+        u_model.stuck_low = 1'b1;
+        expect_fault(3'd2, "SDA stuck low");
+        // 撤销故障并让从机模型恢复正常（相当于排除短路/重新上电从机）
+        u_model.stuck_low = 1'b0;
+        u_model.drive_en  = 1'b0;
+        u_model.active    = 1'b0;
+
+        // 总线恢复后必须能继续采样
+        do_sample(3'd2, 8'h00, "after stuck-low recovery");
+        do_sample(3'd5, 8'h81, "after stuck-low recovery CH5");
 
         if (errors == 0) begin
             $display("TEST PASSED: tb_adc_ads7830");

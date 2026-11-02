@@ -49,7 +49,19 @@ module key_scan #(
 
     // 调试：当前扫描行 / 本拍是否采样
     output logic [ROW_W-1:0]                scan_row_debug,
-    output logic                            scan_sample_debug
+    output logic                            scan_sample_debug,
+
+    //-------------------------------------------------------------------------
+    // 矩阵组合告警（无二极管矩阵的固有限制，见文件末尾说明）
+    //   ghost_detect  : 某个 2x2 矩形里出现了 3 个及以上按键
+    //                   -> 第 4 个角会被误读成“按下”（鬼键）
+    //   row_conflict  : 同一列上跨行出现 2 个及以上按键
+    //                   -> 未选中的行正在输出高电平，会与选中行的低电平
+    //                      通过两个按键直接短路（行驱动争用）
+    //   这两路只是告警，不改变扫描结果；要彻底消除请给每个按键串二极管。
+    //-------------------------------------------------------------------------
+    output logic                            ghost_detect,
+    output logic                            row_conflict
 );
 
     localparam integer DWELL_CYC = (ROW_DWELL_CYC < (SETTLE_CYC + 2))
@@ -120,5 +132,56 @@ module key_scan #(
 
     assign scan_row_debug    = row_idx;
     assign scan_sample_debug = (dwell_cnt == DWELL_W'(SETTLE_CYC));
+
+    //-------------------------------------------------------------------------
+    // 矩阵组合告警（组合逻辑，只做检测，不修改扫描结果）
+    //
+    //   无二极管矩阵的两个已知问题：
+    //   1. 同列跨行双键：选中行输出低、未选中行输出高，两个按键会把
+    //      这两个行输出直接短接 —— 电学上是行驱动争用，可能过热/损坏。
+    //   2. L 形三键：扫描某一行时，另一个未按的键会被误读成按下（鬼键）。
+    //   本模块用 raw_key_state 做检测：出现这些组合时拉高对应告警，
+    //   便于上层提示“当前键位组合不可靠”。真正的解决办法是每键串
+    //   1N4148（或换成只按单个根音键的配置模式）。
+    //-------------------------------------------------------------------------
+    always_comb begin
+        // 2 位足够表示 0~4 个角的和（显式位宽，避免依赖表达式的上下文位宽）
+        logic [2:0] corner_sum;
+
+        ghost_detect = 1'b0;
+        row_conflict = 1'b0;
+        corner_sum   = 3'd0;
+
+        // 1) 同列跨行：>=2 个按键
+        for (int c = 0; c < COL_COUNT; c++) begin
+            for (int r0 = 0; r0 < ROW_COUNT; r0++) begin
+                for (int r1 = 0; r1 < ROW_COUNT; r1++) begin
+                    if ((r1 > r0) && raw_key_state[r0*COL_COUNT + c] &&
+                        raw_key_state[r1*COL_COUNT + c]) begin
+                        row_conflict = 1'b1;
+                    end
+                end
+            end
+        end
+
+        // 2) 2x2 矩形内 >=3 个按键：第 4 个角会被误读
+        for (int r0 = 0; r0 < ROW_COUNT; r0++) begin
+            for (int r1 = 0; r1 < ROW_COUNT; r1++) begin
+                for (int c0 = 0; c0 < COL_COUNT; c0++) begin
+                    for (int c1 = 0; c1 < COL_COUNT; c1++) begin
+                        if ((r1 > r0) && (c1 > c0)) begin
+                            corner_sum = {2'd0, raw_key_state[r0*COL_COUNT + c0]}
+                                       + {2'd0, raw_key_state[r0*COL_COUNT + c1]}
+                                       + {2'd0, raw_key_state[r1*COL_COUNT + c0]}
+                                       + {2'd0, raw_key_state[r1*COL_COUNT + c1]};
+                            if (corner_sum >= 3'd3) begin
+                                ghost_detect = 1'b1;
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
 
 endmodule

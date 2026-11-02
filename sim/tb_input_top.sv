@@ -49,6 +49,9 @@ module tb_input_top;
     logic        adc_bus_error;
     logic        input_overflow;
     logic signed [3:0] octave_debug;
+    logic        key_ghost_debug;
+    logic        key_conflict_debug;
+    logic        adc_timeout_debug;
 
     logic [15:0] pressed;       // bit[row*4+col] = 按下
 
@@ -130,7 +133,10 @@ module tb_input_top;
         .adc_valid      (adc_valid),
         .adc_bus_error  (adc_bus_error),
         .input_overflow (input_overflow),
-        .octave_debug   (octave_debug)
+        .octave_debug   (octave_debug),
+        .key_ghost_debug  (key_ghost_debug),
+        .key_conflict_debug (key_conflict_debug),
+        .adc_timeout_debug  (adc_timeout_debug)
     );
 
     //-------------------------------------------------------------------------
@@ -214,6 +220,7 @@ module tb_input_top;
     //-------------------------------------------------------------------------
     initial begin
         int base;
+        int exp_expr;
 
         pressed = '0;
         u_model.adc_val[0] = 8'h40;   // FSR   = 64
@@ -420,7 +427,11 @@ module tb_input_top;
         end
 
         //---------------------------------------------------------------------
-        // 8) 波形切换：K14 循环 0 -> 1 -> 2 -> 0
+        // 8) 波形切换
+        //   成员 1 的 waveform_rom 目前只实现正弦波，切到 1/2 会静音。
+        //   因此输入侧默认 WAVEFORM_MAX_SEL=0：按 K14 不改变 waveform_sel，
+        //   避免一次误按把整件乐器切静音（评审清单第 8 项）。
+        //   完整的 0->1->2->0 循环由 tb_matrix_config（显式置 2）覆盖。
         //---------------------------------------------------------------------
         repeat (30) @(posedge clk);
         if (waveform_sel !== 2'b00) begin
@@ -430,28 +441,12 @@ module tb_input_top;
 
         tap_key(14);
         repeat (30) @(posedge clk);
-        if (waveform_sel !== 2'b01) begin
-            $display("FAIL: waveform_sel=%0d after 1 press, expected 1",
-                     waveform_sel);
-            errors++;
-        end
-
-        tap_key(14);
-        repeat (30) @(posedge clk);
-        if (waveform_sel !== 2'b10) begin
-            $display("FAIL: waveform_sel=%0d after 2 presses, expected 2",
-                     waveform_sel);
-            errors++;
-        end
-
-        tap_key(14);
-        repeat (30) @(posedge clk);
         if (waveform_sel !== 2'b00) begin
-            $display("FAIL: waveform_sel=%0d after 3 presses, expected 0",
+            $display("FAIL: waveform_sel=%0d after K14, expected 0 (只实现正弦)",
                      waveform_sel);
             errors++;
         end else begin
-            $display("PASS: waveform cycles 0->1->2->0");
+            $display("PASS: waveform key keeps sine (未实现的波形不会静音)");
         end
 
         //---------------------------------------------------------------------
@@ -471,8 +466,134 @@ module tb_input_top;
         check_event(base + 1, 2'b10, 7'd60, "trig P0 NOTE_OFF C4");
 
         //---------------------------------------------------------------------
-        // 10) 最终检查
+        // 10) 背压协议（F-17）
+        //    FIFO 满时，事件只能停在译码器/skid 里等待，
+        //    不能向 event_queue 发出 "valid=1 && ready=0"（会被误判为 overflow）。
         //---------------------------------------------------------------------
+        event_ready = 1'b0;
+        repeat (5) @(posedge clk);
+
+        // 4 个键 × (ON + OFF) = 8 个事件，刚好填满 FIFO
+        for (int k = 0; k < 4; k++) begin
+            tap_key(k);
+        end
+
+        // 再按第 5 个键：事件只能在等待，不能误报溢出
+        base = ev_count;
+        press_key(4);
+        repeat (300) @(posedge clk);
+
+        if (input_overflow !== 1'b0) begin
+            $display("FAIL: false overflow while FIFO full (F-17)");
+            errors++;
+        end else begin
+            $display("PASS: no false overflow under FIFO backpressure");
+        end
+
+        // 顶层所见事件仍应是 FIFO 队首，字段稳定
+        if (!event_valid) begin
+            $display("FAIL: FIFO should still present its head event");
+            errors++;
+        end
+
+        event_ready = 1'b1;                  // 释放背压
+        release_key(4);
+        repeat (2500) @(posedge clk);        // 排空全部事件
+
+        if (input_overflow !== 1'b0) begin
+            $display("FAIL: overflow after draining (%0d events)", ev_count);
+            errors++;
+        end
+
+        //---------------------------------------------------------------------
+        // 11) 测试模式切换：不得撤销下游未接收的事件，切换时补 ALL_NOTES_OFF
+        //     （评审清单第 5 项）
+        //---------------------------------------------------------------------
+        base = ev_count;
+        @(negedge clk);
+        event_ready = 1'b0;
+        test_mode   = 1'b1;
+
+        begin : chk_mode_switch
+            int guard;
+            guard = 0;
+            while (!(event_valid && event_type == 2'b11) && guard < 5000) begin
+                @(posedge clk);
+                guard++;
+            end
+            if (!(event_valid && event_type == 2'b11)) begin
+                $display("FAIL: mode switch did not emit ALL_NOTES_OFF");
+                errors++;
+            end else begin
+                $display("PASS: mode switch emits ALL_NOTES_OFF");
+            end
+        end
+
+        repeat (200) @(posedge clk);
+        if (!event_valid || event_type !== 2'b11 || event_note_id !== 7'd0) begin
+            $display("FAIL: synthetic ALL_OFF not held (valid=%b type=%0d note=%0d)",
+                     event_valid, event_type, event_note_id);
+            errors++;
+        end else begin
+            $display("PASS: synthetic ALL_OFF held stable under backpressure");
+        end
+
+        @(negedge clk);
+        event_ready = 1'b1;
+        wait_events(base + 2, 3000, "stub restarted after mode switch");
+        check_event(base,     2'b11, 7'd0,  "mode switch ALL_OFF");
+        check_event(base + 1, 2'b01, 7'd60, "stub first event after switch");
+
+        // 回到真实输入：切换时同样要经过 ALL_OFF
+        base = ev_count;
+        @(negedge clk);
+        test_mode = 1'b0;
+        wait_events(base + 1, 3000, "mode switch back ALL_OFF");
+        check_event(base, 2'b11, 7'd0, "switch back ALL_OFF");
+        repeat (100) @(posedge clk);
+
+        //---------------------------------------------------------------------
+        // 12) 矩阵组合告警（无二极管矩阵的固有限制，评审清单第 18 项）
+        //     K0=(r0,c0)、K4=(r1,c0) 同列跨行 -> key_conflict_debug=1
+        //     再按 K1=(r0,c1) 组成 L 形三键 -> key_ghost_debug=1
+        //     两路告警只是提示，不改变事件输出。
+        //---------------------------------------------------------------------
+        press_key(0);
+        press_key(4);
+        repeat (200) @(posedge clk);
+        if (key_conflict_debug !== 1'b1) begin
+            $display("FAIL: key_conflict_debug=0 for same-column two keys");
+            errors++;
+        end else begin
+            $display("PASS: same-column keys flagged (row_conflict)");
+        end
+
+        press_key(1);
+        repeat (200) @(posedge clk);
+        if (key_ghost_debug !== 1'b1) begin
+            $display("FAIL: key_ghost_debug=0 for L-shaped three keys");
+            errors++;
+        end else begin
+            $display("PASS: L-shaped combo flagged (ghost_detect)");
+        end
+
+        release_key(0);
+        release_key(1);
+        release_key(4);
+        repeat (400) @(posedge clk);
+        if (key_ghost_debug !== 1'b0 || key_conflict_debug !== 1'b0) begin
+            $display("FAIL: matrix flags not cleared (ghost=%b conflict=%b)",
+                     key_ghost_debug, key_conflict_debug);
+            errors++;
+        end
+
+        //---------------------------------------------------------------------
+        // 13) 最终检查
+        //---------------------------------------------------------------------
+        if (adc_timeout_debug !== 1'b0) begin
+            $display("FAIL: adc_timeout_debug asserted");
+            errors++;
+        end
         if (input_overflow !== 1'b0) begin
             $display("FAIL: input_overflow asserted");
             errors++;
@@ -490,6 +611,21 @@ module tb_input_top;
         if (expr_valid !== 1'b1) begin
             $display("FAIL: expr_valid should be 1 after ADC sampling");
             errors++;
+        end
+
+        // expression 映射：应抬升到 EXPR_MIN..255，松手不能为 0
+        exp_expr = 96 + ((int'(fsr_filtered) * 159) >> 8);
+        if (int'(expression) < 96) begin
+            $display("FAIL: expression=%0d below EXPR_MIN=96", expression);
+            errors++;
+        end else if (int'(expression) < exp_expr - 2 ||
+                     int'(expression) > exp_expr + 2) begin
+            $display("FAIL: expression=%0d, expected ~%0d (fsr_filtered=%0d)",
+                     expression, exp_expr, fsr_filtered);
+            errors++;
+        end else begin
+            $display("PASS: expression=%0d (fsr_filtered=%0d)",
+                     expression, fsr_filtered);
         end
 
         if (errors == 0) begin

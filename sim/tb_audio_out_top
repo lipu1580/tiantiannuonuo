@@ -1,0 +1,301 @@
+`timescale 1ns/1ps
+// ============================================================================
+// 成员三完整链路自检 testbench（配合 member3_fixed 修正版）。
+// 编译：本文件 + audio_out_top.sv + pcm_sink.sv + i2s_tx.sv。
+// 仿真顶层选 tb_audio_out_top；不需要成员一、开发板顶层或 MAX98357A 实物。
+// 本文件只用于仿真，不能综合/下载到 FPGA。
+//
+// 测试方法：
+// 1. 扮演成员一，通过 valid/ready 发送 PCM，并记录真正握手成功的数据；
+// 2. 在 I2S 引脚端扮演接收芯片，按标准 I2S 时序还原左右声道；
+// 3. 自动比较发送数据与接收数据，不依靠肉眼判断波形。
+// ============================================================================
+module tb_audio_out_top;
+    localparam integer SYS_CLK_HZ = 27_000_000;
+    localparam integer SAMPLE_RATE = 48_000;
+    localparam integer FIFO_DEPTH = 8;
+    localparam real CLK_NS = 1.0e9 / SYS_CLK_HZ;
+    localparam real FRAME_NS = 1.0e9 / SAMPLE_RATE;
+    localparam integer MAX_RECORDS = 4096;
+
+    // 1. 产生系统时钟：27 MHz，一个周期约 37.037 ns。
+    logic sys_clk = 0;
+    always #(CLK_NS/2.0) sys_clk = ~sys_clk;
+
+    logic rst_n = 0;
+    logic signed [15:0] pcm_left = 0, pcm_right = 0;
+    logic pcm_valid = 0;
+    wire pcm_ready;
+    wire i2s_bclk, i2s_lrclk, i2s_din;
+    wire underrun, overflow;
+
+    // 2. DUT = 被测试的设计。封装内部已经包含另外两个模块。
+    audio_out_top #(
+        .SYS_CLK_HZ(SYS_CLK_HZ), .SAMPLE_RATE(SAMPLE_RATE),
+        .SAMPLE_W(16), .FIFO_DEPTH(FIFO_DEPTH)
+    ) dut (
+        .sys_clk(sys_clk), .rst_n(rst_n),
+        .pcm_left(pcm_left), .pcm_right(pcm_right),
+        .pcm_valid(pcm_valid), .pcm_ready(pcm_ready),
+        .i2s_bclk(i2s_bclk), .i2s_lrclk(i2s_lrclk), .i2s_din(i2s_din),
+        .underrun(underrun), .overflow(overflow)
+    );
+
+    // phase 用于看波形时定位测试阶段。
+    integer phase = 0;
+    integer i, seed = 20261028, gap_cycles;
+    bit allow_protocol_error = 0;
+
+    // 参考队列只根据模块外部的 PCM 握手记录数据，不读内部存储器。
+    reg [31:0] accepted_pcm [0:MAX_RECORDS-1];
+    time accepted_at [0:MAX_RECORDS-1];
+    integer input_count = 0, reference_read = 0;
+    integer blocked_cycles = 0, total_decoded_samples = 0, total_checked_frames = 0;
+
+    // 一帧的期望值在 WS 下降沿确定；实际解码约一帧后才完成。
+    reg [31:0] expected_frame [0:MAX_RECORDS-1];
+    reg frame_contains_sample [0:MAX_RECORDS-1];
+    integer frame_count = 0;
+    bit reference_started = 0, reference_underrun = 0;
+    realtime last_frame_time = 0.0, frame_period;
+
+    // 3. 输入监视器：每次成功握手只记录一次。
+    always @(posedge sys_clk) begin
+        if (!rst_n) begin
+            input_count = 0;
+        end else begin
+            if (pcm_valid && pcm_ready) begin
+                if (input_count >= MAX_RECORDS) $fatal(1, "Reference queue full");
+                accepted_pcm[input_count] = {pcm_left, pcm_right};
+                accepted_at[input_count] = $time;
+                input_count = input_count + 1;
+            end
+            if (pcm_valid && !pcm_ready) blocked_cycles = blocked_cycles + 1;
+            #1; // 等待 DUT 的非阻塞赋值完成，再检查状态。
+            if (!allow_protocol_error && overflow !== 1'b0)
+                $fatal(1, "Unexpected overflow/protocol error in phase %0d", phase);
+        end
+    end
+
+    // 4. 输出帧的参考模型，同时检查 48 kHz 帧周期和欠载标志。
+    // 此 FIFO 不是空队列直通结构：本拍刚入队的数据最早下一拍才能送往 I2S。
+    // 因此若样本恰好在 WS 下降沿同拍才由外部接收，它不能用于这一帧。
+    always @(negedge i2s_lrclk or negedge rst_n) begin
+        if (!rst_n) begin
+            reference_read = 0; frame_count = 0;
+            reference_started = 0; reference_underrun = 0;
+            last_frame_time = 0.0;
+        end else begin
+            if (frame_count >= MAX_RECORDS) $fatal(1, "Frame queue full");
+            if (last_frame_time != 0.0) begin
+                frame_period = $realtime - last_frame_time;
+                // 分数分频允许相邻帧有约一拍 sys_clk 的量化差。
+                if (frame_period < FRAME_NS-CLK_NS-1.0 ||
+                    frame_period > FRAME_NS+CLK_NS+1.0)
+                    $fatal(1, "Wrong LRCLK period: %0.3f ns", frame_period);
+            end
+            last_frame_time = $realtime;
+
+            frame_contains_sample[frame_count] = 0;
+            expected_frame[frame_count] = 0;
+            if (reference_read < input_count && accepted_at[reference_read] < $time) begin
+                expected_frame[frame_count] = accepted_pcm[reference_read];
+                frame_contains_sample[frame_count] = 1;
+                reference_read = reference_read + 1;
+                reference_started = 1;
+            end else if (reference_started) begin
+                reference_underrun = 1;
+            end
+            frame_count = frame_count + 1;
+            #1;
+            if (underrun !== reference_underrun)
+                $fatal(1, "Underrun/startup status mismatch in phase %0d", phase);
+        end
+    end
+
+    // 5. I2S 接收解码器：只看 BCLK/WS/DIN 三根线。
+    // 标准 I2S：WS 改变的那个上升沿仍采前一声道的末位，
+    // 下一个 BCLK 上升沿才采新声道的最高位 MSB。
+    bit synchronized_to_left = 0, previous_ws = 1, receiving_right = 0;
+    integer bit_count = 0, decoded_frames = 0, decoded_samples = 0;
+    reg [31:0] shift_register = 0;
+    reg [15:0] expected_channel;
+    logic signed [15:0] decoded_left = 0, decoded_right = 0;
+
+    always @(posedge i2s_bclk or negedge rst_n) begin
+        if (!rst_n) begin
+            synchronized_to_left = 0; previous_ws = 1; receiving_right = 0;
+            bit_count = 0; decoded_frames = 0; decoded_samples = 0;
+            shift_register = 0; decoded_left = 0; decoded_right = 0;
+        end else begin
+            if (synchronized_to_left) begin
+                shift_register = {shift_register[30:0], i2s_din};
+                bit_count = bit_count + 1;
+                if (bit_count == 32) begin
+                    // 16 位 PCM 左对齐在 32 位槽中，后 16 位必须补零。
+                    expected_channel = receiving_right ?
+                        expected_frame[decoded_frames][15:0] :
+                        expected_frame[decoded_frames][31:16];
+                    if (shift_register !== {expected_channel, 16'b0})
+                        $fatal(1, "I2S data mismatch phase=%0d frame=%0d right=%0d got=%h expected=%h",
+                               phase, decoded_frames, receiving_right,
+                               shift_register, {expected_channel,16'b0});
+
+                    if (!receiving_right) decoded_left = shift_register[31:16];
+                    else begin
+                        decoded_right = shift_register[31:16];
+                        if (frame_contains_sample[decoded_frames]) begin
+                            decoded_samples = decoded_samples + 1;
+                            total_decoded_samples = total_decoded_samples + 1;
+                        end
+                        decoded_frames = decoded_frames + 1;
+                        total_checked_frames = total_checked_frames + 1;
+                    end
+                end
+            end
+            if (i2s_lrclk != previous_ws) begin
+                if (synchronized_to_left && bit_count != 32)
+                    $fatal(1, "Wrong I2S slot length: %0d bits", bit_count);
+                // 上电后先等到完整左槽边界，跳过复位后的不完整右槽。
+                if (synchronized_to_left || !i2s_lrclk) begin
+                    synchronized_to_left = 1;
+                    receiving_right = i2s_lrclk;
+                    bit_count = 0;
+                    shift_register = 0;
+                end
+            end
+            previous_ws = i2s_lrclk;
+        end
+    end
+
+    // 数据与声道标志不能在接收器采样的高电平期间变化。
+    always @(i2s_din or i2s_lrclk) if (rst_n) begin
+        #1;
+        if (rst_n && i2s_bclk !== 1'b0)
+            $fatal(1, "DIN/WS changed while BCLK high");
+    end
+
+    // 6. 发送一对 PCM：下降沿放数据，上升沿等握手。
+    // ready=0 时一直保持同一份数据，不制造正常测试中的协议错误。
+    task send_pcm(input reg [15:0] left_value, input reg [15:0] right_value);
+        begin
+            @(negedge sys_clk);
+            pcm_left = left_value; pcm_right = right_value; pcm_valid = 1;
+            @(posedge sys_clk);
+            while (!pcm_ready) @(posedge sys_clk);
+            @(negedge sys_clk); pcm_valid = 0;
+        end
+    endtask
+
+    task reset_design;
+        begin
+            @(negedge sys_clk);
+            rst_n = 0; pcm_valid = 0; pcm_left = 0; pcm_right = 0;
+            allow_protocol_error = 0;
+            repeat (6) @(negedge sys_clk);
+            if (overflow !== 0 || underrun !== 0 || pcm_ready !== 0 || i2s_bclk !== 0)
+                $fatal(1, "Reset did not clear status");
+            rst_n = 1;
+        end
+    endtask
+
+    task drain_and_check;
+        begin
+            // 包含有效的全零 PCM；不能把所有零帧都误当作缺样帧跳过。
+            wait (decoded_samples == input_count);
+            repeat (3) @(negedge sys_clk);
+            if (reference_read != input_count) $fatal(1, "PCM not fully consumed");
+        end
+    endtask
+
+    // 故意犯一次协议错误，验证 overflow 检测，而不是实际业务发送方法。
+    task provoke_protocol_error(input bit withdraw_valid);
+        begin
+            reset_design();
+            @(negedge i2s_lrclk);
+            // 预取槽 1 份 + FIFO 8 份，在下一音频帧之前填满。
+            for (i=0; i<FIFO_DEPTH+1; i=i+1) send_pcm(16'h1000+i,16'h8000+i);
+            @(negedge sys_clk);
+            pcm_left = 16'h1234; pcm_right = 16'h5678; pcm_valid = 1;
+            #1;
+            if (pcm_ready !== 0) $fatal(1, "Test did not fill FIFO");
+            // 等一个上升沿，使 DUT 记住被阻塞的数据。
+            @(negedge sys_clk);
+            allow_protocol_error = 1;
+            if (withdraw_valid) pcm_valid = 0;
+            else pcm_left = 16'h1235;
+            @(negedge sys_clk);
+            if (overflow !== 1) $fatal(1, "Protocol violation not detected");
+            repeat (3) @(negedge sys_clk);
+            if (overflow !== 1) $fatal(1, "Protocol error did not stay latched");
+            reset_design(); // 同时验证错误可清除，丢弃本测试未播放的样本。
+        end
+    endtask
+
+    // 7. 主测试流程。每个阶段会打印提示，全部通过才打印最终 PASS。
+    initial begin
+        phase = 1;
+        $display("[1] Reset and startup silence");
+        reset_design();
+        repeat (1800) @(negedge sys_clk);
+        if (underrun !== 0 || decoded_frames < 2)
+            $fatal(1, "Startup silence not verified");
+
+        phase = 2;
+        $display("[2] Signed/zero PCM and FIFO backpressure");
+        send_pcm(16'h7fff,16'h8000);
+        send_pcm(16'hffff,16'h0000);
+        send_pcm(16'h0000,16'h0001);
+        send_pcm(16'h0000,16'h0000);
+        send_pcm(16'ha55a,16'h5aa5);
+        send_pcm(16'h0001,16'hffff);
+        for (i=0; i<64; i=i+1) send_pcm(i*193+1,~(i*317+7));
+        drain_and_check();
+        if (input_count != 70 || blocked_cycles == 0)
+            $fatal(1, "Burst/backpressure coverage missing");
+
+        phase = 3;
+        $display("[3] Underrun silence and recovery");
+        repeat (1800) @(negedge sys_clk);
+        if (underrun !== 1) $fatal(1, "Underrun not detected");
+        for (i=0; i<48; i=i+1) begin
+            gap_cycles = $random(seed) & 63;
+            repeat (gap_cycles) @(negedge sys_clk);
+            send_pcm(16'h9000+i*97,16'h6000-i*43);
+        end
+        drain_and_check();
+        if (input_count != 118) $fatal(1, "Recovery sample count mismatch");
+
+        phase = 4;
+        $display("[4] Reset while samples remain buffered");
+        for (i=0; i<6; i=i+1) send_pcm(16'h1100+i,16'h2200+i);
+        reset_design();
+        for (i=0; i<12; i=i+1) send_pcm(16'h3300+i,16'h4400+i);
+        drain_and_check();
+        if (input_count != 12) $fatal(1, "Restart sample count mismatch");
+
+        phase = 5;
+        $display("[5] Deliberately change stalled PCM; expect overflow=1");
+        provoke_protocol_error(0);
+        phase = 6;
+        $display("[6] Deliberately withdraw stalled valid; expect overflow=1");
+        provoke_protocol_error(1);
+
+        phase = 7;
+        $display("[7] Final restart and clean PCM playback");
+        for (i=0; i<16; i=i+1) send_pcm(i,16'hfff0+i);
+        drain_and_check();
+        if (input_count != 16 || overflow !== 0)
+            $fatal(1, "Final restart failed");
+        phase = 8;
+        $display("PASS: all 7 stages passed; decoded PCM pairs=%0d, checked frames=%0d, blocked cycles=%0d",
+                 total_decoded_samples, total_checked_frames, blocked_cycles);
+        $finish;
+    end
+
+    // 某模块不产生时钟/ready 时，也应失败而不是永久卡住仿真。
+    initial begin
+        #10_000_000; // 10 ms 是仿真超时限制，不是对系统演奏延迟的测量。
+        $fatal(1, "TIMEOUT in phase %0d", phase);
+    end
+endmodule

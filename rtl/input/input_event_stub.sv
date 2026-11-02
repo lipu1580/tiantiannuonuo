@@ -21,7 +21,8 @@
 //   1 = 8 音琶音
 //   2 = 单音重复（延迟测试）
 //   3 = 多音 + ALL_NOTES_OFF 压力测试
-//   切换 pattern 会从 0 ms 重新开始。
+//   切换 pattern 时不会撤销下游还没接收的事件：当前事件先送完，再补一个
+//   ALL_NOTES_OFF 释放上一段序列的音符，然后从 0 ms 重新开始。
 //
 // 【重要】
 //   成员 1 的 audio_core 内部也有 audio_test_source。上板时两套测试源
@@ -42,6 +43,10 @@ module input_event_stub #(
 
     // 测试序列选择
     input  logic [1:0] test_pattern,
+
+    // 立即复位序列（由 input_top 在事件源切换时给出）
+    //   只在“没有未接收事件”的时刻使用，避免撤销下游还没接收的事件。
+    input  logic       restart,
 
     // 标准演奏事件输出
     output logic       event_valid,
@@ -186,61 +191,82 @@ module input_event_stub #(
     //-------------------------------------------------------------------------
     // 发送状态机
     //   - 每拍最多输出 1 个事件；
-    //   - 未握手成功时 valid_r/字段保持不变；
-    //   - 握手成功后 seq_idx 前进；走到表尾则回绕到 0 并重置 t_ms；
-    //   - test_pattern 变化时立即重启序列。
+    //   - 未握手成功时 valid_r/字段保持不变：**不能**中止或改写下游还没接收
+    //     的事件（评审清单第 6 项）；
+    //   - test_pattern 变化不打断当前事件：先把手上的事件送完，再补一个
+    //     ALL_NOTES_OFF 释放上一段序列留下的音符，然后从 0 ms 重新开始；
+    //   - restart=1 由 input_top 在事件源切换时给出，此刻没有未接收事件，
+    //     可以立即复位序列。
     //-------------------------------------------------------------------------
-    logic [1:0]  pattern_d;  // 上一拍 pattern，用于检测切换
-    logic [15:0] t_ms;       // 序列内部毫秒计数
-    logic        valid_r;    // 输出事件有效
-    logic [1:0]  type_r;     // 输出事件字段
-    logic [6:0]  note_r;
-    logic [7:0]  vel_r;
+    logic [1:0]  pattern_d;   // 上一拍 pattern，用于检测切换
+    logic [15:0] t_ms;        // 序列内部毫秒计数
+    logic        valid_r;     // 输出事件有效
+    logic [16:0] ev_r;        // {type[1:0], note[6:0], velocity[7:0]}
+    logic        restart_req; // 有待执行的序列重启
+    logic        alloff_r;    // 正在发送重启前的 ALL_NOTES_OFF
 
     always_ff @(posedge sys_clk) begin
         if (!rst_n) begin
-            seq_idx    <= '0;
-            pattern_d  <= 2'd0;
-            t_ms       <= 16'd0;
-            valid_r    <= 1'b0;
-            type_r     <= EVENT_NOP;
-            note_r     <= 7'd0;
-            vel_r      <= 8'd0;
-        end else if (test_pattern != pattern_d) begin
-            // pattern 切换：从 0 ms 重新开始
-            pattern_d <= test_pattern;
-            seq_idx   <= '0;
-            t_ms      <= 16'd0;
-            valid_r   <= 1'b0;
+            seq_idx     <= '0;
+            pattern_d   <= test_pattern;
+            t_ms        <= 16'd0;
+            valid_r     <= 1'b0;
+            ev_r        <= {EVENT_NOP, 7'd0, 8'd0};
+            restart_req <= 1'b0;
+            alloff_r    <= 1'b0;
+        end else if (restart) begin
+            // 立即复位：只在 input_top 完成“排空 + ALL_OFF”之后使用
+            seq_idx     <= '0;
+            pattern_d   <= test_pattern;
+            t_ms        <= 16'd0;
+            valid_r     <= 1'b0;
+            ev_r        <= {EVENT_NOP, 7'd0, 8'd0};
+            restart_req <= 1'b0;
+            alloff_r    <= 1'b0;
         end else begin
+            // pattern 变化：只记录请求，不打断正在等待握手的事件
+            if (test_pattern != pattern_d) begin
+                restart_req <= 1'b1;
+            end
+
             if (ms_tick) begin
                 t_ms <= t_ms + 1'b1;
             end
 
             if (valid_r && event_ready) begin
-                // 握手成功：本事件完成，下一拍取下一条
+                // 握手成功：本事件完成
                 valid_r <= 1'b0;
-                if ((seq_idx + 1'b1) >= seq_len) begin
+                if (alloff_r) begin
+                    // ALL_NOTES_OFF 已送出 -> 现在真正重启序列
+                    alloff_r    <= 1'b0;
+                    restart_req <= 1'b0;
+                    pattern_d   <= test_pattern;
+                    seq_idx     <= '0;
+                    t_ms        <= '0;
+                end else if ((seq_idx + 1'b1) >= seq_len) begin
                     seq_idx <= '0;
                     t_ms    <= 16'd0;   // 整段循环
                 end else begin
                     seq_idx <= seq_idx + 1'b1;
                 end
             end else if (!valid_r) begin
-                // 没有待发事件：时间到了就锁存下一条并置 valid
-                if (t_ms >= entry[32:17]) begin
+                if (restart_req) begin
+                    // 先发 ALL_NOTES_OFF，避免上一段序列的持续音留着
+                    valid_r  <= 1'b1;
+                    ev_r     <= {EVENT_ALL_NOTES_OFF, 7'd0, 8'd0};
+                    alloff_r <= 1'b1;
+                end else if (t_ms >= entry[32:17]) begin
+                    // 时间到了就锁存下一条并置 valid
                     valid_r <= 1'b1;
-                    type_r  <= entry[16:15];
-                    note_r  <= entry[14:8];
-                    vel_r   <= entry[7:0];
+                    ev_r    <= {entry[16:15], entry[14:8], entry[7:0]};
                 end
             end
         end
     end
 
     assign event_valid    = valid_r;
-    assign event_type     = type_r;
-    assign event_note_id  = note_r;
-    assign event_velocity = vel_r;
+    assign event_type     = ev_r[16:15];
+    assign event_note_id  = ev_r[14:8];
+    assign event_velocity = ev_r[7:0];
 
 endmodule

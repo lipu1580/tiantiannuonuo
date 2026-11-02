@@ -21,8 +21,9 @@
 //
 // 【重要】
 //   本模块每拍最多输出 1 个事件；多键同时按下时会按键号从小到大
-//   依次送出。下游若长时间不 ready，槽位可能被后来的同键事件覆盖，
-//   这属于 FIFO 溢出前的极端情况，可用 input_overflow 监控。
+//   依次送出。每个键有 2 个待发槽位，所以“NOTE_ON 还没被下游接收就
+//   松手”不会再丢掉 NOTE_ON；极端情况下同键短时间内积压 3 个事件才会
+//   丢弃新事件并置 event_overflow（不静默覆盖已排队的事件）。
 //
 // 【MATRIX_MODE 两种模式】
 //   0 = 矩阵当键盘（当前测试模式）：K0~K11 直接发 NOTE_ON/NOTE_OFF。
@@ -48,7 +49,11 @@ module key_event_decoder #(
     parameter integer     NOTE_KEY_COUNT = 12,               // 音符/根音键数
     parameter logic [6:0] BASE_NOTE      = project_params_pkg::NOTE_BASE_C4,    // K0 起始音
     parameter logic [7:0] DEFAULT_VEL    = audio_defs_pkg::DEFAULT_VELOCITY,// 力度缺失时的默认值
-    parameter integer     MATRIX_MODE    = 0                 // 0=键盘模式 1=配置模式
+    parameter integer     MATRIX_MODE    = 0,                // 0=键盘模式 1=配置模式
+    // 波形键循环的上限：0 = 只有正弦（当前成员 1 的 waveform_rom 只实现正弦），
+    // 1 = 正弦/方波，2 = 正弦/方波/锯齿。
+    // 成员 1 的波表补平方波、锯齿后再把它改成 2，否则切到未实现的波形会静音。
+    parameter logic [1:0] WAVEFORM_MAX_SEL = project_params_pkg::WAVEFORM_MAX_SEL
 )(
     input  logic                    sys_clk,
     input  logic                    rst_n,
@@ -75,7 +80,10 @@ module key_event_decoder #(
     output logic [6:0]              base_note,		//当前的根音也要传出去
 
     // 调试：当前按住的音符键
-    output logic [KEY_COUNT-1:0]    active_note_mask
+    output logic [KEY_COUNT-1:0]    active_note_mask,
+
+    // 待发槽位溢出（粘滞，只有复位能清）。为 1 表示极端背压下丢过事件。
+    output logic                    event_overflow
 );
 
     // event_req_sel 需要能表示 0~KEY_COUNT；0 专门表示 ALL_OFF
@@ -127,15 +135,22 @@ module key_event_decoder #(
     endgenerate
 
     //-------------------------------------------------------------------------
-    // 待发事件表：每个物理键一个槽位
-    //   pend_valid[i] : 第 i 个键有事件待发
-    //   pend_type/note/vel : 事件字段
-    //   这样同一拍按下的多个键各自占一个槽位，不会互相覆盖。
+    // 待发事件表：每个物理键两个槽位（小队列）
+    //   p0 是更早的事件、p1 是后来的事件，同一拍按下的多个键各自占槽位。
+    //   只有一个槽位时，“NOTE_ON 还没被下游接收，紧接着松手发出 NOTE_OFF”
+    //   会把 NOTE_ON 覆盖掉：那个音符已经发声，却再也收不到 OFF，
+    //   于是变成持续音，而 input_overflow 还报不出来（评审清单第 7 项）。
     //-------------------------------------------------------------------------
-    logic [KEY_COUNT-1:0] pend_valid;
-    logic [1:0]           pend_type [KEY_COUNT];
-    logic [6:0]           pend_note [KEY_COUNT];
-    logic [7:0]           pend_vel  [KEY_COUNT];
+    localparam integer EV_W = 2 + 7 + 8;      // {type, note, velocity}
+
+    logic [KEY_COUNT-1:0] p0_valid;
+    logic [KEY_COUNT-1:0] p1_valid;
+    logic [EV_W-1:0]      p0_ev [KEY_COUNT];
+    logic [EV_W-1:0]      p1_ev [KEY_COUNT];
+
+    logic [KEY_COUNT-1:0] pop_mask;   // 本拍被取走的键
+    logic                 pop_mask_any;
+    logic                 ovf_r;      // 槽位溢出（粘滞，复位清除）
 
     // ALL_OFF 后抑制这些键的释放事件
     logic [KEY_COUNT-1:0] suppress_release;
@@ -167,35 +182,68 @@ module key_event_decoder #(
     assign press_oct_down = |(key_pressed & oct_down_mask);
 
     //-------------------------------------------------------------------------
+    // 把事件压入第 k 个键的 2 槽位队列
+    //   同一拍该键可能正好弹出一个槽位（pop_mask[k]），可用性按弹出后计算。
+    //   每键每拍最多压入一个事件（按下 / 释放互斥）。
+    //-------------------------------------------------------------------------
+    task automatic push_event(input int k, input logic [1:0] t,
+                              input logic [6:0] n, input logic [7:0] v);
+        if (pop_mask[k]) begin
+            // 弹出后 p0 会被旧 p1 填充；只有旧 p1 也空时 p0 才可用
+            if (!p1_valid[k]) begin
+                p0_valid[k] <= 1'b1;
+                p0_ev[k]    <= {t, n, v};
+            end else begin
+                p1_valid[k] <= 1'b1;
+                p1_ev[k]    <= {t, n, v};
+            end
+        end else if (!p0_valid[k]) begin
+            p0_valid[k] <= 1'b1;
+            p0_ev[k]    <= {t, n, v};
+        end else if (!p1_valid[k]) begin
+            p1_valid[k] <= 1'b1;
+            p1_ev[k]    <= {t, n, v};
+        end else begin
+            // 两个槽位都满：保住在队事件，丢弃新事件并报警
+            ovf_r <= 1'b1;
+        end
+    endtask
+
+    //-------------------------------------------------------------------------
     // 状态更新
     //-------------------------------------------------------------------------
     always_ff @(posedge sys_clk) begin
         if (!rst_n) begin
-            pend_valid       <= '0;
+            p0_valid         <= '0;
+            p1_valid         <= '0;
+            ovf_r            <= 1'b0;
             pend_all_off     <= 1'b0;
             suppress_release <= '0;
             octave_offset    <= 4'sd0;
             waveform_sel     <= WAVE_SINE;
             root_pitch_class <= 4'd0;   // 默认 C
             for (int i = 0; i < KEY_COUNT; i++) begin
-                pend_type[i]    <= EVENT_NOP;
-                pend_note[i]    <= 7'd0;
-                pend_vel[i]     <= 8'd0;
+                p0_ev[i]        <= '0;
+                p1_ev[i]        <= '0;
                 latched_note[i] <= 7'd0;
             end
         end else begin
             //-----------------------------------------------------------------
-            // 1) 先处理握手清除
-            //    如果本拍选中事件被 FIFO 接收，就清除对应槽位。
-            //    清除写在前、新事件写在后：同一拍同槽位的新事件会覆盖清除，
-            //    保证“新事件优先”。
+            // 1) 先处理握手弹出：p1 -> p0，并清空 p1
+            //    同一拍新事件写回同一槽位时会覆盖这里的赋值（新事件优先）
             //-----------------------------------------------------------------
-            if (event_req_valid && event_req_ready) begin
-                if (event_req_sel == '0) begin
-                    pend_all_off <= 1'b0;
-                end else begin
-                    pend_valid[event_req_sel-1] <= 1'b0;
+            if (pop_mask_any) begin
+                for (int i = 0; i < KEY_COUNT; i++) begin
+                    if (pop_mask[i]) begin
+                        p0_valid[i] <= p1_valid[i];
+                        p0_ev[i]    <= p1_ev[i];
+                        p1_valid[i] <= 1'b0;
+                    end
                 end
+            end
+
+            if (event_req_valid && event_req_ready && (event_req_sel == '0)) begin
+                pend_all_off <= 1'b0;
             end
 
             //-----------------------------------------------------------------
@@ -208,12 +256,10 @@ module key_event_decoder #(
                     if (MATRIX_MODE == 0) begin
                         // 按下：锁存音符，填入 NOTE_ON 槽位
                         latched_note[i] <= map_note[i];
-                        pend_valid[i]   <= 1'b1;
-                        pend_type[i]    <= EVENT_NOTE_ON;
-                        pend_note[i]    <= map_note[i];
                         // velocity=0 会被成员 1 当作无声，这里兜底为默认力度
-                        pend_vel[i]     <= (velocity_in == 8'd0) ? DEFAULT_VEL
-                                                                 : velocity_in;
+                        push_event(i, EVENT_NOTE_ON, map_note[i],
+                                   (velocity_in == 8'd0) ? DEFAULT_VEL
+                                                         : velocity_in);
                     end else begin
                         // 配置模式：K0~K11 选择根音音级 0~11
                         // 同时按下多个根音键时，循环中最后（最大）键号生效；
@@ -227,10 +273,8 @@ module key_event_decoder #(
                     if (suppress_release[i]) begin
                         suppress_release[i] <= 1'b0;
                     end else begin
-                        pend_valid[i] <= 1'b1;
-                        pend_type[i]  <= EVENT_NOTE_OFF;
-                        pend_note[i]  <= latched_note[i]; // 用按下时锁存的音高
-                        pend_vel[i]   <= 8'd0;
+                        // 用按下时锁存的音高，避免中途切八度导致 OFF 发错音符
+                        push_event(i, EVENT_NOTE_OFF, latched_note[i], 8'd0);
                     end
                 end
             end
@@ -238,7 +282,6 @@ module key_event_decoder #(
             //-----------------------------------------------------------------
             // 3) 八度 / 波形 / ALL_NOTES_OFF
             //-----------------------------------------------------------------
-			//  想升             并且还能升
             if (press_oct_up && octave_offset < 4'sd2) begin
                 octave_offset <= octave_offset + 4'sd1;   // 上限 +2
             end
@@ -246,9 +289,11 @@ module key_event_decoder #(
                 octave_offset <= octave_offset - 4'sd1;   // 下限 -2
             end
             if (press_wave) begin
-                // 0 -> 1 -> 2 -> 0，3 保留
-                waveform_sel <= (waveform_sel == WAVE_SAWTOOTH) ? WAVE_SINE
-                                                                : waveform_sel + 1'b1;
+                // 只在已实现的波形编号内循环（见 WAVEFORM_MAX_SEL 说明）。
+                // 成员 1 的 waveform_rom 目前只实现了正弦波，如果这里照样
+                // 切到 1/2，整路音频会静音（评审清单第 8 项）。
+                waveform_sel <= (waveform_sel >= WAVEFORM_MAX_SEL)
+                                ? WAVE_SINE : (waveform_sel + 1'b1);
             end
 
             // ALL_NOTES_OFF 最后执行，保证同周期普通事件被清除：
@@ -257,16 +302,27 @@ module key_event_decoder #(
             //   - 把当前按住的音符键标记为“释放时不再发 OFF”
             if (press_all_off) begin
                 pend_all_off     <= 1'b1;
-                pend_valid       <= '0;
+                p0_valid         <= '0;
+                p1_valid         <= '0;
                 suppress_release <= (key_down | key_pressed) & note_key_mask;
             end
+        end
+    end
+
+    // 本拍是否有键被取走（用于跳过整段弹出循环）
+    always_comb begin
+        pop_mask     = '0;
+        pop_mask_any = 1'b0;
+        if (event_req_valid && event_req_ready && (event_req_sel != '0)) begin
+            pop_mask[event_req_sel - 1'b1] = 1'b1;
+            pop_mask_any = 1'b1;
         end
     end
 
     //-------------------------------------------------------------------------
     // 事件选择：ALL_NOTES_OFF > 最小键号
     //   倒序扫描 pending 表：越小的键号越晚赋值，最终拥有更高优先级。
-    //   输出组合逻辑直接读取 pend_*，因此选中事件在握手前保持稳定。
+    //   p0_ev 是寄存器，握手前字段天然稳定。
     //-------------------------------------------------------------------------
     always_comb begin
         event_req_valid    = 1'b0;
@@ -283,12 +339,10 @@ module key_event_decoder #(
         end else begin
             // 倒序扫描，使最小键号拥有最高优先级
             for (int i = KEY_COUNT - 1; i >= 0; i--) begin
-                if (pend_valid[i]) begin
-                    event_req_valid    = 1'b1;
-                    event_req_type     = pend_type[i];
-                    event_req_note     = pend_note[i];
-                    event_req_velocity = pend_vel[i];
-                    event_req_sel      = IDX_W'(i + 1);
+                if (p0_valid[i]) begin
+                    event_req_valid = 1'b1;
+                    {event_req_type, event_req_note, event_req_velocity} = p0_ev[i];
+                    event_req_sel   = IDX_W'(i + 1);
                 end
             end
         end
@@ -312,5 +366,6 @@ module key_event_decoder #(
 
     // 当前真正按住的音符键（不含功能键）
     assign active_note_mask = key_down & note_key_mask;
+    assign event_overflow   = ovf_r;
 
 endmodule

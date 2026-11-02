@@ -134,6 +134,9 @@ module cfg_master (
     logic       vib_pending_valid;// 有一笔颤音写排队
     logic [7:0] vib_pending_data; // 待写深度
 
+    logic       fx_pend_valid;    // 有一个效果请求待启动（背压时不丢弃）
+    logic [1:0] fx_pend_mode;     // 待启动的目标模式
+
     logic [2:0] seq_last;         // 当前序列最后一步的步号
 
     assign seq_last = seq_len(seq_mode) - 3'd1;
@@ -211,6 +214,23 @@ module cfg_master (
 
     assign handshake = cfg_valid && cfg_ready;
 
+    //-------------------------------------------------------------------------
+    // 抢占时机门控（协议硬约束）
+    //
+    //   协议 §4.1 规则 2：cfg_valid=1 && cfg_ready=0 时，发送方必须保持
+    //   valid/write/addr/wdata 稳定。所以效果键**不能**在“本笔还没被接收”
+    //   的时候直接换序列——那会把已经展示给对端的一笔偷偷改掉。
+    //
+    //   做法：新请求先进 1 深度待决寄存器（fx_pend_*），只有总线不再受阻
+    //   的那一拍才真正换序列。放在待决寄存器里也就自然获得了“合并”行为：
+    //   连续按键时最终采用最后一次，符合协议 §4.3。
+    //-------------------------------------------------------------------------
+    logic bus_stalled;   // 当前这一笔还没被接收
+    logic start_fx;      // 可以启动/切换到待决序列
+
+    assign bus_stalled = cfg_valid && !cfg_ready;
+    assign start_fx    = fx_pend_valid && !bus_stalled;
+
     always_ff @(posedge sys_clk) begin
         if (!rst_n) begin
             busy              <= 1'b0;
@@ -220,15 +240,30 @@ module cfg_master (
             vib_pending_data  <= 8'd0;
             vib_step          <= 2'd0;
             fx_mode_latched   <= 2'd0;
+            fx_pend_valid     <= 1'b0;
+            fx_pend_mode      <= 2'd0;
         end else begin
             //-----------------------------------------------------------------
-            // 1) 效果键：最高优先级，抢占正在跑的序列
+            // 1) 启动 / 切换到新序列
+            //    - 总线空闲时：新请求**当拍**就被采纳，下一拍开始发第 0 步
+            //      （保持 1 拍延迟，与“无背压”时手感一致）
+            //    - 总线被卡住时：不采纳，先记进 fx_pend_*（见下面第 2 段）
+            //    抢占语义：从新序列第 0 步重跑。若本拍恰有一笔旧序列被接收，
+            //    那笔已经无法撤回（valid/ready 不允许），于是旧序列最多多写
+            //    1 笔中间步，结构仍完整。
             //-----------------------------------------------------------------
-            if (fx_req) begin
+            if (fx_req && !bus_stalled) begin
                 seq_mode        <= fx_mode_req;
                 fx_mode_latched <= fx_mode_req;
                 step            <= 3'd0;
                 busy            <= 1'b1;
+                fx_pend_valid   <= 1'b0;   // 新请求覆盖任何旧待决
+            end else if (start_fx) begin
+                seq_mode        <= fx_pend_mode;
+                fx_mode_latched <= fx_pend_mode;
+                step            <= 3'd0;
+                busy            <= 1'b1;
+                fx_pend_valid   <= 1'b0;
             end else if (busy) begin
                 if (handshake) begin
                     if (step == seq_last) begin
@@ -238,6 +273,16 @@ module cfg_master (
                         step <= step + 3'd1;
                     end
                 end
+            end
+
+            //-----------------------------------------------------------------
+            // 2) 总线被卡住时到来的效果键：只记录，不动总线字段
+            //    （与上面第 1 段互斥：bus_stalled 为 1 时第 1 段不会改写
+            //      fx_pend_valid，所以两处的赋值不会冲突）
+            //-----------------------------------------------------------------
+            if (fx_req && bus_stalled) begin
+                fx_pend_mode  <= fx_mode_req;
+                fx_pend_valid <= 1'b1;
             end
 
             //-----------------------------------------------------------------

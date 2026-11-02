@@ -333,6 +333,66 @@ module tb_cfg_master;
         chk(4, A_WET,  32'd64,   "背压恢复");
 
         //---------------------------------------------------------------------
+        // A5b 背压 + 抢占：未握手的请求字段绝不能变
+        //   协议 §4.1 规则 2：cfg_valid=1 && cfg_ready=0 时
+        //   valid/write/addr/wdata 必须保持稳定。
+        //   所以"被背压卡住时又按了别的效果键"，必须先把当前这笔送完，
+        //   再换新序列——不能把对端正在看的这笔偷偷改掉。
+        //---------------------------------------------------------------------
+        clear_rec;
+        cfg_ready = 1'b0;
+        @(negedge clk);
+        fx_req      = 1'b1;
+        fx_mode_req = 2'd1;          // 延迟
+        @(negedge clk);
+        fx_req      = 1'b0;
+        repeat (5) @(posedge clk);
+
+        begin
+            logic [7:0]  a0;
+            logic [31:0] d0;
+            a0 = cfg_addr;  d0 = cfg_wdata;
+
+            // 卡住期间再按混响
+            @(negedge clk);
+            fx_req      = 1'b1;
+            fx_mode_req = 2'd3;
+            @(negedge clk);
+            fx_req      = 1'b0;
+            repeat (30) @(posedge clk);
+
+            checks++;
+            if (cfg_addr !== a0 || cfg_wdata !== d0 || !cfg_valid) begin
+                $display("FAIL [A5b 背压+抢占]: 未握手时字段被改动 (%0d->0x%02h<-%0d)",
+                         a0, cfg_addr, cfg_wdata);
+                errors++;
+            end else if (rec_cnt != 0) begin
+                $display("FAIL [A5b 背压+抢占]: ready=0 期间不应有握手");
+                errors++;
+            end else begin
+                $display("PASS [A5b 背压+抢占]: 0x%02h<-%0d 保持稳定", a0, d0);
+            end
+        end
+
+        // 放开背压：先送完被卡的那一笔，再从混响第 0 步重跑
+        cfg_ready = 1'b1;
+        while (cfg_busy) @(posedge clk);
+        repeat (4) @(posedge clk);
+
+        checks++;
+        if (rec_cnt != 4) begin
+            $display("FAIL [A5b 恢复]: %0d 笔, 期望 4（1 笔在途 + 混响 3 笔）",
+                     rec_cnt);
+            errors++;
+        end else begin
+            $display("PASS [A5b 恢复]: 4 笔（1 笔在途 + 混响 3 笔）");
+        end
+        chk(0, A_WET, 32'd0, "A5b 在途的一笔");
+        chk(1, A_WET,  32'd0,  "A5b 之后是混响");
+        chk(2, A_MODE, 32'd3,  "A5b 之后是混响");
+        chk(3, A_WET,  32'd64, "A5b 之后是混响");
+
+        //---------------------------------------------------------------------
         // A7 复位：序列中途复位
         //---------------------------------------------------------------------
         clear_rec;

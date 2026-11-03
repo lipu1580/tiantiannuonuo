@@ -17,6 +17,9 @@ module tb_dds_oscillator;
     logic [PHASE_W-1 : 0] phase_increment = 10'b0000000001;
     logic signed [SAMPLE_W-1:0]    waveform_sample;
     logic signed [SAMPLE_W-1:0] sine_table [0:TABLE_DEPTH-1];
+    logic signed [SAMPLE_W-1:0] organ_table [0:TABLE_DEPTH-1];
+    logic signed [SAMPLE_W-1:0] pluck_table [0:TABLE_DEPTH-1];
+    logic signed [SAMPLE_W-1:0] expected_sample;
     logic [PHASE_W - 1:0] phase_accumulator;
 
     dds_oscillator #(
@@ -52,14 +55,18 @@ module tb_dds_oscillator;
     initial begin
         rst_n        = 1'b0;
         audio_ce     = 1'b0;
-        waveform_sel = 2'b00; // 当前只支持正弦波
+        waveform_sel = 2'b00;
         $readmemh(INIT_FILE, sine_table);
+        $readmemh("rtl/audio/organ_1024.hex", organ_table);
+        $readmemh("rtl/audio/pluck_1024.hex", pluck_table);
         #(RESET_DURATION);
 
         rst_n = 1;
 
+        for (int wave_id = 0; wave_id < 4; wave_id++) begin
         repeat (40) begin
         @(negedge sys_clk);
+        waveform_sel = 2'(wave_id);
         audio_ce = 1;
         @(posedge sys_clk);
         #1;
@@ -69,13 +76,21 @@ module tb_dds_oscillator;
 
         @(negedge sys_clk);
         audio_ce = 0;
+        // 请求之后改变选择，返回样本仍应属于请求时的音色。
+        waveform_sel = 2'(wave_id + 1);
 
         @(posedge sys_clk);
         #1;
         if (waveform_valid !== 1'b1) begin
             $fatal(1, "没有收到有效样本");
         end
-        if (waveform_sample !== sine_table[phase_accumulator]) begin
+        case (wave_id)
+            0: expected_sample = sine_table[phase_accumulator];
+            1: expected_sample = organ_table[phase_accumulator];
+            2: expected_sample = pluck_table[phase_accumulator];
+            default: expected_sample = '0;
+        endcase
+        if (waveform_sample !== expected_sample) begin
             $fatal(1, "没收到正确的样本");
         end
 
@@ -83,6 +98,7 @@ module tb_dds_oscillator;
         #1;
         if (waveform_valid !== 1'b0) begin
             $fatal(1, "没有恢复0");
+        end
         end
         end
         $display("PASS-------------------");

@@ -149,6 +149,11 @@ module audio_core #(
             .pitch_bend     (pitch_bend_reg),
             .waveform_sel   (waveform_sel_reg),
 
+            // 颤音系数：旧核心没有颤音功能，固定给 Q20 的 1.0（= 2^20），
+            // 使 voice 内的 vibrato_product >> 20 成为恒等运算。
+            // 若这里不接，端口悬空为 0 -> phase_increment 归零 -> 整机静音。
+            .vibrato_ratio_q20 (21'd1_048_576),
+
             .voice_sample   (voice_sample[i]),
             .sample_valid   (voice_sample_valid[i]),
             .active         (voice_active[i]),

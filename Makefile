@@ -48,6 +48,7 @@ AUDIO_TBS := \
 	tb_dds_oscillator \
 	tb_note_freq_lut \
 	tb_pitch_bend_lut \
+	tb_vibrato_lfo \
 	tb_pcm_stream_adapter \
 	tb_sample_tick_gen \
 	tb_section2 \
@@ -59,7 +60,10 @@ VTB := \
 	tb_audio_core \
 	tb_audio_test_source \
 	tb_event_router \
-	tb_voice_manager
+	tb_voice_manager \
+	tb_audio_cfg_regs \
+	tb_audio_core_expr_cfg \
+	tb_vibrato_luts
 
 .PHONY: all lint lint-audio lint-top lint-all sim sim-audio sim-v sim-all clean help
 

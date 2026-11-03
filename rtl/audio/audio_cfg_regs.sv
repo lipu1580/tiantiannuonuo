@@ -5,14 +5,16 @@ module audio_cfg_regs  # (
 )(
     input logic         sys_clk,
     input logic         rst_n,
-    input logic [5:0]   wr_en,
+    input logic [6:0]   wr_en,           // bit6：fx_clear 命令写使能
     input logic [31:0]  wr_data,
+    input logic         fx_clear_done,   // 核心在 FX 确实完成清理后产生的单周期脉冲
     output logic [7:0]  vibrato_depth,
     output logic [15:0] vibrato_rate,
     output logic [1:0]  fx_mode,
     output logic [7:0]  wet_gain,
     output logic [11:0] delay_samples,
-    output logic [7:0]  feedback_gain
+    output logic [7:0]  feedback_gain,
+    output logic        fx_clear         // 已接受但尚未完成的清理命令，供 0x3C 读回
 );
     logic [31:0]    vibrato_depth_reg,
                     vibrato_rate_reg,
@@ -111,6 +113,17 @@ module audio_cfg_regs  # (
     assign wet_gain = wet_gain_reg[7:0];
     assign delay_samples = delay_samples_reg[11:0];
     assign feedback_gain = feedback_gain_reg[7:0];
+
+    // clear 是命令，不是普通参数；写 0 不取消，握手提交也不代表完成。
+    // 若完成旧命令的同一拍接受了新命令，新命令优先保留。
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n)
+            fx_clear <= 1'b0;
+        else if (wr_en[6] && wr_data[0])
+            fx_clear <= 1'b1;
+        else if (fx_clear_done)
+            fx_clear <= 1'b0;
+    end
 endmodule
 // 颤音频率采用 Q8.8：保存值除以 256，就是 Hz。0x0500 是十进制 1280，表示 5 Hz。
 //干湿和反馈比例采用 Q0.8：保存值除以 256，就是实际比例。128 表示 0.5

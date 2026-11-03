@@ -1,6 +1,6 @@
 `timescale 1ns/1ns
 
-// 仅测试寄存器模块；地址译码、总线握手和清尾音命令由 core 的 TB 验证。
+// 测试参数寄存器及清理命令的保持/完成；地址译码和总线回压由 core TB 验证。
 module cfg_regs_test_case #(
     parameter int DEPTH = 4096
 )(
@@ -9,8 +9,10 @@ module cfg_regs_test_case #(
 );
     logic sys_clk = 0;
     logic rst_n = 0;
-    logic [5:0] wr_en = 0;
+    logic [6:0] wr_en = 0;
     logic [31:0] wr_data = 0;
+    logic fx_clear_done = 0, fx_clear;
+    bit expected_clear = 0;
     logic [7:0] vibrato_depth, wet_gain, feedback_gain;
     logic [15:0] vibrato_rate;
     logic [1:0] fx_mode;
@@ -35,6 +37,12 @@ module cfg_regs_test_case #(
     always #5 sys_clk = ~sys_clk;
 
     task automatic compare_outputs(input string label_text);
+        checks++;
+        if (fx_clear !== expected_clear) begin
+            errors++;
+            $display("FAIL depth=%0d %s fx_clear: expected=%b got=%b",
+                     DEPTH, label_text, expected_clear, fx_clear);
+        end
         for (int index = 0; index < 6; index++) begin
             checks++;
             if (observed[index] !== expected[index]) begin
@@ -49,14 +57,16 @@ module cfg_regs_test_case #(
 
     task automatic step(
         input bit reset_active,
-        input logic [5:0] enable,
+        input logic [6:0] enable,
         input logic [31:0] data,
-        input string label_text
+        input string label_text,
+        input bit clear_complete = 0
     );
         @(negedge sys_clk);
         rst_n = !reset_active;
         wr_en = enable;
         wr_data = data;
+        fx_clear_done = clear_complete;
         #1;
         // 写入和复位都只能在上升沿生效；输入变化不应直接改变输出。
         if (model_valid) compare_outputs({label_text, " before edge"});
@@ -68,8 +78,11 @@ module cfg_regs_test_case #(
             expected[3] = 0;
             expected[4] = (DEPTH-1 < 1920) ? 32'(DEPTH-1) : 32'd1920;
             expected[5] = 0;
+            expected_clear = 0;
         end
         else begin
+            if (enable[6] && data[0]) expected_clear = 1;
+            else if (clear_complete) expected_clear = 0;
             // 合法输入为零或独热写使能；其他寄存器必须保持。
             for (int index = 0; index < 6; index++) begin
                 if (enable[index]) begin
@@ -87,49 +100,58 @@ module cfg_regs_test_case #(
     initial begin
         logic [31:0] random_state;
         for (int index = 0; index < 6; index++) failures[index] = 0;
-        step(1, 6'b000000, 0, "reset defaults");
-        step(0, 6'b000000, 32'hffffffff, "hold after reset");
+        step(1, 7'b0000000, 0, "reset defaults");
+        step(0, 7'b0000000, 32'hffffffff, "hold after reset");
 
         // 每个寄存器均验证上下限、边界邻近值、内部值及完整 32 位无符号限幅。
         for (int index = 0; index < 6; index++) begin
-            step(0, 6'b000001 << index, 0, "write zero");
-            step(0, 6'b000001 << index, lower_bound[index], "minimum");
+            step(0, 7'b0000001 << index, 0, "write zero");
+            step(0, 7'b0000001 << index, lower_bound[index], "minimum");
             if (lower_bound[index] > 0)
-                step(0, 6'b000001 << index, lower_bound[index]-1, "below minimum");
+                step(0, 7'b0000001 << index, lower_bound[index]-1, "below minimum");
             if (lower_bound[index] < upper_bound[index])
-                step(0, 6'b000001 << index, lower_bound[index]+1, "above minimum");
-            step(0, 6'b000001 << index,
+                step(0, 7'b0000001 << index, lower_bound[index]+1, "above minimum");
+            step(0, 7'b0000001 << index,
                  (lower_bound[index]+upper_bound[index])/2, "interior value");
             if (upper_bound[index] > lower_bound[index])
-                step(0, 6'b000001 << index, upper_bound[index]-1, "below maximum");
-            step(0, 6'b000001 << index, upper_bound[index], "maximum");
-            step(0, 6'b000001 << index, upper_bound[index]+1, "above maximum");
-            step(0, 6'b000001 << index, 32'h00010001, "high bits must not be discarded");
-            step(0, 6'b000001 << index, 32'h80000000, "unsigned sign-bit input");
-            step(0, 6'b000001 << index, 32'hffffffff, "maximum unsigned input");
-            step(0, 6'b000000, 0, "disabled write holds all registers");
+                step(0, 7'b0000001 << index, upper_bound[index]-1, "below maximum");
+            step(0, 7'b0000001 << index, upper_bound[index], "maximum");
+            step(0, 7'b0000001 << index, upper_bound[index]+1, "above maximum");
+            step(0, 7'b0000001 << index, 32'h00010001, "high bits must not be discarded");
+            step(0, 7'b0000001 << index, 32'h80000000, "unsigned sign-bit input");
+            step(0, 7'b0000001 << index, 32'hffffffff, "maximum unsigned input");
+            step(0, 7'b0000000, 0, "disabled write holds all registers");
         end
 
         // 小数编码应原样保留，不应在寄存器里先右移或转换单位。
-        step(0, 6'b000010, 1280, "5 Hz encoding");
-        step(0, 6'b000010, 1408, "5.5 Hz encoding");
-        step(0, 6'b001000, 128, "wet gain 0.5 encoding");
-        step(0, 6'b100000, 64, "feedback 0.25 encoding");
-        step(0, 6'b000100, 256, "mode 256 must clamp to 3");
+        step(0, 7'b0000010, 1280, "5 Hz encoding");
+        step(0, 7'b0000010, 1408, "5.5 Hz encoding");
+        step(0, 7'b0001000, 128, "wet gain 0.5 encoding");
+        step(0, 7'b0100000, 64, "feedback 0.25 encoding");
+        step(0, 7'b0000100, 256, "mode 256 must clamp to 3");
 
         // 每周期均可接受一笔写入，无需插入空闲周期。
         // 固定种子的混合序列同时检查地址之间的写入隔离与状态保持。
         random_state = 32'h12ab5678;
         for (int cycle = 0; cycle < 120; cycle++) begin
             random_state = random_state * 32'd1664525 + 32'd1013904223;
-            step(0, 6'b000001 << (cycle % 6),
+            step(0, 7'b0000001 << (cycle % 6),
                  cycle % 2 == 0 ? random_state : random_state % 32'd4097,
                  "consecutive mixed writes");
         end
-        step(1, 6'b111111, 32'hffffffff, "reset overrides writes");
-        step(1, 6'b000010, 32'd2048, "held reset overrides writes");
-        step(0, 6'b000000, 0, "hold reset defaults");
-        step(0, 6'b000001, 32'd50, "resume after reset");
+        // 清理不修改配置；只解释 bit0，写 0 不取消，必须等完成脉冲。
+        step(0, 7'b1000000, 32'hfffffffe, "clear ignores upper bits");
+        step(0, 7'b1000000, 32'hffffffff, "request clear");
+        step(0, 0, 0, "clear holds without completion");
+        step(0, 7'b1000000, 0, "write zero must not cancel clear");
+        step(0, 7'b0001000, 32'd65, "ordinary write during clear");
+        step(0, 0, 0, "clear completes", 1);
+        step(0, 0, 0, "completion does not retrigger clear");
+        step(0, 7'b1000000, 1, "new clear wins simultaneous completion", 1);
+        step(1, 7'b1111111, 32'hffffffff, "reset overrides writes and clear", 1);
+        step(1, 7'b0000010, 32'd2048, "held reset overrides writes");
+        step(0, 7'b0000000, 0, "hold reset defaults");
+        step(0, 7'b0000001, 32'd50, "resume after reset");
 
         $display("RESULT depth=%0d checks=%0d errors=%0d per-register=%0d/%0d/%0d/%0d/%0d/%0d",
                  DEPTH, checks, errors, failures[0], failures[1], failures[2],

@@ -1,0 +1,93 @@
+// YYH / Tang Nano 20K GW2AR-LV18QN88C8/I7
+// Matches current tang_nano20k_top, 21 scalar IOs.
+// External MAX98357A; LCD connector must remain disconnected.
+// Pin numbers are FPGA package pins, NOT header positions.
+// rst_n: connect FPGA pin 74 (J6-2) to board 3.3V (J6-19).
+// Fixed-high reset input, no reset button. NEVER connect to 5V.
+// Current top provides startup reset via initialized reset_pipe.
+// Keep JTAG, MSPI, SSPI reserved. No special-pin reuse needed.
+
+// 27MHz onboard clock
+IO_LOC "sys_clk" 4;
+IO_PORT "sys_clk" IO_TYPE=LVCMOS33;
+
+// J6-2: input held at 3.3V for normal operation.
+// PULL_MODE=UP is a weak pull-up, not an output driving this pin.
+IO_LOC "rst_n" 74;
+IO_PORT "rst_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// matrix R1
+IO_LOC "key_row[0]" 25;
+IO_PORT "key_row[0]" IO_TYPE=LVCMOS33;
+
+// matrix R2
+IO_LOC "key_row[1]" 26;
+IO_PORT "key_row[1]" IO_TYPE=LVCMOS33;
+
+// matrix R3
+IO_LOC "key_row[2]" 27;
+IO_PORT "key_row[2]" IO_TYPE=LVCMOS33;
+
+// matrix R4
+IO_LOC "key_row[3]" 28;
+IO_PORT "key_row[3]" IO_TYPE=LVCMOS33;
+
+// matrix C1
+IO_LOC "key_col[0]" 29;
+IO_PORT "key_col[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// matrix C2
+IO_LOC "key_col[1]" 30;
+IO_PORT "key_col[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// matrix C3
+IO_LOC "key_col[2]" 31;
+IO_PORT "key_col[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// matrix C4
+IO_LOC "key_col[3]" 42;
+IO_PORT "key_col[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// J5-10
+IO_LOC "adc_scl" 48;
+IO_PORT "adc_scl" IO_TYPE=LVCMOS33;
+
+// J5-12
+IO_LOC "adc_sda" 49;
+IO_PORT "adc_sda" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// J5-18 external MAX98357A BCLK
+IO_LOC "i2s_bclk" 71;
+IO_PORT "i2s_bclk" IO_TYPE=LVCMOS33;
+
+// J5-17 external MAX98357A LRC
+IO_LOC "i2s_lrclk" 72;
+IO_PORT "i2s_lrclk" IO_TYPE=LVCMOS33;
+
+// J6-1 external MAX98357A DIN
+IO_LOC "i2s_din" 73;
+IO_PORT "i2s_din" IO_TYPE=LVCMOS33;
+
+// onboard active-low LED
+IO_LOC "led_n[0]" 15;
+IO_PORT "led_n[0]" IO_TYPE=LVCMOS33;
+
+// onboard active-low LED
+IO_LOC "led_n[1]" 16;
+IO_PORT "led_n[1]" IO_TYPE=LVCMOS33;
+
+// onboard active-low LED
+IO_LOC "led_n[2]" 17;
+IO_PORT "led_n[2]" IO_TYPE=LVCMOS33;
+
+// onboard active-low LED
+IO_LOC "led_n[3]" 18;
+IO_PORT "led_n[3]" IO_TYPE=LVCMOS33;
+
+// onboard active-low LED
+IO_LOC "led_n[4]" 19;
+IO_PORT "led_n[4]" IO_TYPE=LVCMOS33;
+
+// onboard active-low LED
+IO_LOC "led_n[5]" 20;
+IO_PORT "led_n[5]" IO_TYPE=LVCMOS33;

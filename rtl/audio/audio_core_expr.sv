@@ -1,6 +1,6 @@
 `timescale 1ns/1ns
 
-// 扩展音频核心：颤音、配置快照及效果控制；FX 当前仅实现组合干声通路。
+// 扩展音频核心：颤音、配置快照及效果控制；FX 使用同步块 RAM 延迟存储。
 // 协议见根目录《成员1_扩展音频接口协议.md》。旧 audio_core 接口保持不变。
 module audio_core_expr #(
     parameter integer VOICE_COUNT = 4,             // 复音声部数量
@@ -18,7 +18,7 @@ module audio_core_expr #(
     parameter logic [15:0] RELEASE_STEP = 16'd40,   // 固定 ADSR 释放步长
     parameter integer INPUT_W = 24,                // PCM 适配器输入位宽；本轮等于 OUTPUT_W
     parameter integer OUTPUT_W = 24,               // mixer / 效果器样本位宽
-    parameter integer FX_DELAY_DEPTH = 4096        // 延迟模式缓冲容量，单位：样本
+    parameter integer FX_DELAY_DEPTH = 4096        // 每段效果缓存容量；延迟模式串联三段
 )(
     input  logic                             sys_clk,
     input  logic                             rst_n,             // 低有效，同步复位
@@ -56,7 +56,10 @@ module audio_core_expr #(
     input  logic                             test_mode,
     input  logic [1:0]                       test_pattern,
     output logic [$clog2(VOICE_COUNT+1)-1:0] active_voice_count,
-    output logic [VOICE_COUNT-1:0]           voice_active
+    output logic [VOICE_COUNT-1:0]           voice_active,
+    // 板级诊断：来自 FX 实际状态，不是按键请求或配置寄存器。
+    output logic [1:0]                       fx_mode_debug,
+    output logic                             fx_ready_debug
 );
     localparam logic [7:0] TRILL_DEP_ADDR = 8'h24,
                            TRILL_FREQ_ADDR = 8'h28,
@@ -103,8 +106,16 @@ module audio_core_expr #(
     logic [31:0]                       snapshot;
     logic signed [OUTPUT_W-1:0]        fx_sample;
 
+    // 所有声部使用同一份表情滑音，只实例化一次比例 ROM。
+    logic [20:0] shared_bend_ratio_q20;
+    pitch_bend_ratio_lut u_shared_bend_ratio (
+        .pitch_bend(pitch_bend_reg), .bend_ratio_q20(shared_bend_ratio_q20)
+    );
+
     assign mixer_sample_valid = &voice_sample_valid;
     assign fx_cfg_changed = |wr_en[5:2];
+    assign fx_mode_debug = fx_active_mode;
+    assign fx_ready_debug = rst_n && fx_initialized && !fx_busy && !fx_pending;
     // queued 表示这条命令已装入某个快照，直到清理完成前不能重复装入。
     assign fx_clear_unsent = fx_clear && !fx_clear_queued;
     assign snapshot_load = !snapshot_valid && (fx_cfg_pending || fx_clear_unsent);
@@ -258,17 +269,29 @@ module audio_core_expr #(
     // 深度补一个 0，保证转换为有符号数后仍是正数。
     assign depth_product = lfo_q15 * $signed({1'b0, depth_active});
 
-    // 原乘积带 15 位小数，右移 7 位后保留 8 位小数。
-    assign vibrato_cents_q8 = 18'(depth_product >>> 7);
+    // 乘法与查表插值分级，系数延迟两拍；不改变音分换算的数值精度。
+    logic signed [17:0] vibrato_cents_reg;
+    logic [20:0] vibrato_ratio_next;
+    assign vibrato_cents_q8 = vibrato_cents_reg;
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n) begin
+            vibrato_cents_reg <= '0;
+            vibrato_ratio_q20 <= 21'd1048576;
+        end else begin
+            vibrato_cents_reg <= 18'(depth_product >>> 7);
+            vibrato_ratio_q20 <= vibrato_ratio_next;
+        end
+    end
 
     pitch_ratio_lut u_vibrato_ratio (
         .cents_q8  (vibrato_cents_q8),
-        .ratio_q20 (vibrato_ratio_q20)
+        .ratio_q20 (vibrato_ratio_next)
     );
 
     generate
     for (genvar i = 0; i < VOICE_COUNT; i++) begin : gen_voice
         voice #(
+            .SHARED_PITCH_BEND(1'b1),
             .NOTE_W      (NOTE_W),
             .PHASE_W     (PHASE_W),
             .SAMPLE_W    (SAMPLE_W),
@@ -290,6 +313,7 @@ module audio_core_expr #(
             .velocity       (voice_velocity[i]),
             .expression     (expression_reg),
             .pitch_bend     (pitch_bend_reg),
+            .shared_bend_ratio_q20(shared_bend_ratio_q20),
             .waveform_sel   (waveform_sel_reg),
             .vibrato_ratio_q20 (vibrato_ratio_q20),
 

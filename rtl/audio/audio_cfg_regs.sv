@@ -12,7 +12,7 @@ module audio_cfg_regs  # (
     output logic [15:0] vibrato_rate,
     output logic [1:0]  fx_mode,
     output logic [7:0]  wet_gain,
-    output logic [11:0] delay_samples,
+    output logic [11:0] delay_samples, // 0x34：每段样本数；总延迟为三倍
     output logic [7:0]  feedback_gain,
     output logic        fx_clear         // 已接受但尚未完成的清理命令，供 0x3C 读回
 );

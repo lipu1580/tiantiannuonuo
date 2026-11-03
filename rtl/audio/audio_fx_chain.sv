@@ -1,18 +1,19 @@
 `timescale 1ns/1ns
 
-// 基础效果器：反馈延迟、整数延迟调制合唱、多抽头反馈混响。
-// 组合读 RAM / 同步写 RAM，输出打一拍；可每时钟接受一个样本。
+// 效果器：三段串联反馈延迟、整数延迟调制合唱、三路并联反馈梳状混响。
+// 三块同步 RAM：延迟时串联，混响时独立反馈；读存储、混合/写回分两拍。
+// 读写同址通过显式旁路处理，不依赖器件 RAM 的 read-during-write 模式。
 // 路径：mixer -> audio_fx_chain -> pcm_stream_adapter。
 // 公共 cfg 总线在 audio_core_expr 内统一译码，本模块接收完整参数快照。
 module audio_fx_chain #(
     parameter integer SAMPLE_W = 24,       // 内部输入/输出位宽，保持原 PCM 数值标度
     parameter integer SAMPLE_RATE = 48_000, // 每秒有效输入样本数
-    parameter integer DELAY_DEPTH = 4096    // 延迟模式缓冲容量，单位：样本
+    parameter integer DELAY_DEPTH = 4096    // 每段缓冲容量，单位：样本；延迟模式共三段
 )(
     input  logic                       sys_clk,
     input  logic                       rst_n,             // 低有效，同步复位
 
-    // 音频接口没有 ready：每个 in_valid 接受一个样本，之后输出一次 out_valid。
+    // 音频接口没有 ready：每个 in_valid 接受一个样本，两拍后输出一次 out_valid（相对旧实现增加一拍）。
     // in_valid 接 mixer.mixed_valid，不直接接 audio_ce；内部必须满足采样吞吐。
     input  logic                       in_valid,
     input  logic signed [SAMPLE_W-1:0] in_sample,
@@ -25,7 +26,7 @@ module audio_fx_chain #(
     output logic                       ctrl_ready,
     input  logic [1:0]                ctrl_mode,          // 0 旁路，1 延迟，2 合唱，3 混响
     input  logic [7:0]                ctrl_wet_gain,      // Q0.8，0～128
-    input  logic [11:0]               ctrl_delay_samples, // 1～DELAY_DEPTH-1，仅延迟模式使用
+    input  logic [11:0]               ctrl_delay_samples, // 每段 1～DELAY_DEPTH-1 样本；总延迟为此值的三倍
     input  logic [7:0]                ctrl_feedback_gain, // Q0.8，0～128，仅延迟模式使用
     input  logic                       ctrl_clear,         // 随一次握手接受的清尾音命令
 
@@ -44,12 +45,12 @@ module audio_fx_chain #(
     logic hs_scu;
     logic [1:0]                pending_mode;         // 0 旁路，1 延迟，2 合唱，3 混响
     logic [7:0]                pending_wet_gain;      // Q0.8，0～128
-    logic [11:0]               pending_delay_samples;// 1～DELAY_DEPTH-1，仅延迟模式使用
+    logic [11:0]               pending_delay_samples;// 每段 1～DELAY_DEPTH-1 样本；总延迟为此值的三倍
     logic [7:0]                pending_feedback_gain;// Q0.8，0～128，仅延迟模式使用
     logic                      pending_clear;
     logic [1:0]                active_mode;         // 0 旁路，1 延迟，2 合唱，3 混响
     logic [7:0]                active_wet_gain;      // Q0.8，0～128
-    logic [11:0]               active_delay_samples;// 1～DELAY_DEPTH-1，仅延迟模式使用
+    logic [11:0]               active_delay_samples;// 每段 1～DELAY_DEPTH-1 样本；总延迟为此值的三倍
     logic [7:0]                active_feedback_gain;// Q0.8，0～128，仅延迟模式使用
     logic                      apply_params;
     localparam logic [11:0] DEFAULT_DELAY =
@@ -72,17 +73,35 @@ module audio_fx_chain #(
     localparam integer CH_BASE = imax(1, imin(SAMPLE_RATE * 15 / 1000, DELAY_DEPTH / 2));
     localparam integer CH_SPAN = imin(SAMPLE_RATE * 3 / 1000, (CH_BASE-1) / 2);
     localparam logic [31:0] LFO_STEP = 32'(64'd2147483648 / SAMPLE_RATE); // 0.5 Hz
-    localparam integer REV_LONG = imax(1, imin(SAMPLE_RATE * 43 / 1000, DELAY_DEPTH-1));
-    localparam integer REV_MID = imax(1, REV_LONG * 37 / 43);
-    localparam integer REV_SHORT = imax(1, REV_LONG * 29 / 43);
-    logic signed [SAMPLE_W-1:0] history [0:DELAY_DEPTH-1];
+    // 48 kHz 下为 2887/3469/4001 样本，避免三个反射时间落在同一整数毫秒网格。
+    // 独立 3/4 反馈，理论幅度衰减 60 dB 约需 1.44/1.74/2.00 秒。
+    localparam integer REV_SHORT = imax(1, imin(integer'(64'(SAMPLE_RATE) * 2887 / 48000), DELAY_DEPTH-1));
+    localparam integer REV_MID = imax(1, imin(integer'(64'(SAMPLE_RATE) * 3469 / 48000), DELAY_DEPTH-1));
+    localparam integer REV_LONG = imax(1, imin(integer'(64'(SAMPLE_RATE) * 4001 / 48000), DELAY_DEPTH-1));
+    // 每个数组只有一个同步读口和一个同步写口，可映射为简单双口 BSRAM。
+    // 每块 RAM 的内容可以不同；仍无组合读口，不增加 RAM 深度或乘法器。
+    logic signed [SAMPLE_W-1:0] history_a [0:DELAY_DEPTH-1];
+    logic signed [SAMPLE_W-1:0] history_b [0:DELAY_DEPTH-1];
+    logic signed [SAMPLE_W-1:0] history_c [0:DELAY_DEPTH-1];
+    logic signed [SAMPLE_W-1:0] ram_a_q, ram_b_q, ram_c_q;
+    logic [PTR_W-1:0] read_addr_a, read_addr_b, read_addr_c;
+    logic [PTR_W-1:0] ram_write_addr, sample_addr_q;
+    logic signed [SAMPLE_W-1:0] ram_write_data, ram_write_data_b, ram_write_data_c;
+    logic ram_write_en;
+    logic valid_q, process_q;
+    logic signed [SAMPLE_W-1:0] input_q;
+    logic [1:0] mode_q;
+    logic [7:0] wet_gain_q, feedback_gain_q;
+    logic bypass_a_q, bypass_b_q, bypass_c_q;
+    logic signed [SAMPLE_W-1:0] bypass_data_q, bypass_data_b_q, bypass_data_c_q;
+    logic signed [SAMPLE_W-1:0] tap_a, tap_b, tap_c;
     logic [PTR_W-1:0] wr_ptr, clear_ptr;
     logic [31:0] lfo_phase;
     logic [7:0] triangle;
     integer tap_delay;
     logic signed [MATH_W-1:0] wet_sample, feedback_sample;
     logic signed [MATH_W-1:0] wet_product, feedback_product;
-    logic signed [SAMPLE_W-1:0] processed_sample, write_sample;
+    logic signed [SAMPLE_W-1:0] processed_sample, write_sample, write_sample_b, write_sample_c;
     logic needs_clear, last_clear;
 
     function automatic logic [PTR_W-1:0] tap_addr(input integer delay_count);
@@ -100,60 +119,122 @@ module audio_fx_chain #(
         return SAMPLE_W'(value);
     endfunction
 
+    // 3/4 反馈用加法/移位实现，并向零截断，避免小负数产生永久尾音。
+    function automatic logic signed [SAMPLE_W-1:0] comb_write(
+        input logic signed [SAMPLE_W-1:0] dry, delayed);
+        logic signed [MATH_W-1:0] three_tap;
+        three_tap = MATH_W'(delayed) + (MATH_W'(delayed) <<< 1);
+        if (three_tap < 0) three_tap = three_tap + 3;
+        return saturate(MATH_W'(dry) + (three_tap >>> 2));
+    endfunction
+
+    // 地址仅取决于当前输入样本的写指针/配置；读结果与输入一起寄存。
     always_comb begin
         triangle = lfo_phase[31] ? ~lfo_phase[30:23] : lfo_phase[30:23];
         tap_delay = int'(active_delay_samples);
+        if (active_mode == 2)
+            tap_delay = CH_BASE - CH_SPAN + (int'(triangle) * 2 * CH_SPAN / 256);
+        if (active_mode == 3) tap_delay = REV_SHORT;
+        read_addr_a = tap_addr(tap_delay);
+        read_addr_b = tap_addr(active_mode == 1 ? int'(active_delay_samples) : REV_MID);
+        read_addr_c = tap_addr(active_mode == 1 ? int'(active_delay_samples) : REV_LONG);
+    end
+
+    assign tap_a = bypass_a_q ? bypass_data_q : ram_a_q;
+    assign tap_b = bypass_b_q ? bypass_data_b_q : ram_b_q;
+    assign tap_c = bypass_c_q ? bypass_data_c_q : ram_c_q;
+
+    always_comb begin
         wet_sample = '0;
         feedback_sample = '0;
-        case (active_mode)
+        case (mode_q)
             1: begin
-                wet_sample = MATH_W'(history[tap_addr(tap_delay)]);
+                wet_sample = MATH_W'(tap_c);
                 feedback_sample = wet_sample;
             end
-            2: begin
-                // 最基础的合唱：约 15 +/- 3 ms 整数延迟，无反馈。
-                tap_delay = CH_BASE - CH_SPAN + (int'(triangle) * 2 * CH_SPAN / 256);
-                wet_sample = MATH_W'(history[tap_addr(tap_delay)]);
-            end
+            2: wet_sample = MATH_W'(tap_a);
             3: begin
-                // 三抽头反馈网络：默认约 29/37/43 ms，移位求和控制增益。
-                wet_sample = (MATH_W'(history[tap_addr(REV_SHORT)]) +
-                              MATH_W'(history[tap_addr(REV_MID)]) +
-                              MATH_W'(history[tap_addr(REV_LONG)])) >>> 2;
-                feedback_sample = wet_sample;
+                wet_sample = (MATH_W'(tap_a) + MATH_W'(tap_b) + MATH_W'(tap_c)) >>> 2;
             end
             default: begin end
         endcase
-        wet_product = wet_sample * $signed({1'b0, active_wet_gain});
-        feedback_product = feedback_sample * $signed({1'b0, active_feedback_gain});
-        // 混响固定 1/2 反馈，延迟使用配置反馈，合唱不反馈。
-        if (active_mode == 3) feedback_product = feedback_sample * 128;
-        processed_sample = in_sample;
-        write_sample = in_sample;
-        if (fx_initialized && state != CLEAR && active_mode != 0) begin
-            processed_sample = saturate(MATH_W'(in_sample) + (wet_product >>> 8));
-            write_sample = saturate(MATH_W'(in_sample) + (feedback_product >>> 8));
+        wet_product = wet_sample * $signed({1'b0, wet_gain_q});
+        feedback_product = feedback_sample * $signed({1'b0, feedback_gain_q});
+        processed_sample = input_q;
+        write_sample = input_q;
+        write_sample_b = input_q;
+        write_sample_c = input_q;
+        if (process_q) begin
+            processed_sample = saturate(MATH_W'(input_q) + (wet_product >>> 8));
+            write_sample = saturate(MATH_W'(input_q) + (feedback_product >>> 8));
+            if (mode_q == 1) begin
+                // 每段只存自己的信号；第三段回声反馈到第一段。
+                write_sample_b = tap_a;
+                write_sample_c = tap_b;
+            end else if (mode_q == 3) begin
+                write_sample = comb_write(input_q, tap_a);
+                write_sample_b = comb_write(input_q, tap_b);
+                write_sample_c = comb_write(input_q, tap_c);
+            end
         end
     end
 
-    // RAM 不做整块复位。初始化/清理每个时钟写一个地址，与音频 valid 无关。
+    // 清理与正常写回共用唯一写口。整块 RAM 无复位、无组合读口。
+    assign ram_write_en = rst_n && ((state == CLEAR) || (valid_q && process_q));
+    assign ram_write_addr = (state == CLEAR) ? clear_ptr : sample_addr_q;
+    assign ram_write_data = (state == CLEAR) ? SAMPLE_W'(0) : write_sample;
+    assign ram_write_data_b = (state == CLEAR) ? SAMPLE_W'(0) : write_sample_b;
+    assign ram_write_data_c = (state == CLEAR) ? SAMPLE_W'(0) : write_sample_c;
     always_ff @(posedge sys_clk) begin
-        if (rst_n) begin
-            if (state == CLEAR) history[clear_ptr] <= '0;
-            else if (in_valid && fx_initialized && active_mode != 0)
-                history[wr_ptr] <= write_sample;
+        if (ram_write_en) begin
+            history_a[ram_write_addr] <= ram_write_data;
+            history_b[ram_write_addr] <= ram_write_data_b;
+            history_c[ram_write_addr] <= ram_write_data_c;
         end
+        ram_a_q <= history_a[read_addr_a];
+        ram_b_q <= history_b[read_addr_b];
+        ram_c_q <= history_c[read_addr_c];
     end
+
     always_ff @(posedge sys_clk) begin
         if (!rst_n) begin
-            out_valid <= 0;
+            valid_q <= 1'b0;
+            process_q <= 1'b0;
+            input_q <= '0;
+            sample_addr_q <= '0;
+            mode_q <= '0;
+            wet_gain_q <= '0;
+            feedback_gain_q <= '0;
+            bypass_a_q <= 1'b0;
+            bypass_b_q <= 1'b0;
+            bypass_c_q <= 1'b0;
+            bypass_data_q <= '0;
+            bypass_data_b_q <= '0;
+            bypass_data_c_q <= '0;
+            out_valid <= 1'b0;
             out_sample <= '0;
             wr_ptr <= '0;
             clear_ptr <= '0;
             lfo_phase <= '0;
         end else begin
-            out_valid <= in_valid;
-            if (in_valid) out_sample <= processed_sample;
+            valid_q <= in_valid;
+            out_valid <= valid_q;
+            if (valid_q) out_sample <= processed_sample;
+            if (in_valid) begin
+                input_q <= in_sample;
+                sample_addr_q <= wr_ptr;
+                mode_q <= active_mode;
+                wet_gain_q <= active_wet_gain;
+                feedback_gain_q <= active_feedback_gain;
+                process_q <= fx_initialized && state != CLEAR && active_mode != 0;
+            end
+            // 包括 delay=1、背靠背采样及非 2 次幂深度的环回同址情况。
+            bypass_a_q <= ram_write_en && (read_addr_a == ram_write_addr);
+            bypass_b_q <= ram_write_en && (read_addr_b == ram_write_addr);
+            bypass_c_q <= ram_write_en && (read_addr_c == ram_write_addr);
+            bypass_data_q <= ram_write_data;
+            bypass_data_b_q <= ram_write_data_b;
+            bypass_data_c_q <= ram_write_data_c;
             if (state == CLEAR) begin
                 clear_ptr <= last_clear ? '0 : clear_ptr + 1'b1;
                 wr_ptr <= '0;

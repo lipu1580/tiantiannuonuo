@@ -10,7 +10,8 @@ module voice #(
     parameter logic [15:0] ATTACK_STEP   = 16'd500,    // ADSR 起音步长
     parameter logic [15:0] DECAY_STEP    = 16'd30,     // ADSR 衰减步长
     parameter logic [15:0] SUSTAIN_LEVEL = 16'd42000, // ADSR 延音电平
-    parameter logic [15:0] RELEASE_STEP  = 16'd40     // ADSR 释放步长
+    parameter logic [15:0] RELEASE_STEP  = 16'd40,    // ADSR 释放步长
+    parameter bit SHARED_PITCH_BEND = 1'b0
 )(
     input  logic                         sys_clk, // 系统主时钟
     input  logic                         rst_n,   // 低有效复位
@@ -28,9 +29,11 @@ module voice #(
     output logic signed [OUTPUT_W-1:0]   voice_sample, // 当前声部有符号样本
     output logic                         sample_valid, // 当前声部样本有效
     output logic                         active, // 声部仍处于发声/释放状态
-    output logic [15:0]                  envelope_value // 当前包络电平
+    output logic [15:0]                  envelope_value, // 当前包络电平
+    input logic [20:0]                   shared_bend_ratio_q20 // SHARED_PITCH_BEND=1 时使用
 );
-    logic signed [PHASE_W-1:0] waveform_sample;
+    logic waveform_valid;
+    logic signed [SAMPLE_W-1:0] waveform_sample;
     logic [PHASE_W-1:0] phase_increment;
     logic [PHASE_W-1:0] mid_out_increment;
     logic [NOTE_W-1:0] lock_note_id;
@@ -47,14 +50,50 @@ module voice #(
         .phase_increment (mid_out_increment)
     );
 
-    pitch_bend_lut pitch_bend_lut (
-        .in_phase_increment(mid_out_increment),
-        .pitch_bend        (pitch_bend),
-        .phase_increment   (bend_phase_increment)
-    );
+    generate
+        if (SHARED_PITCH_BEND) begin : gen_shared_bend
+            // 保留旧 pitch_bend_lut 的 32 位输入/截断语义，只有系数表被共享。
+            logic [52:0] product;
+            assign product = 32'(mid_out_increment) * shared_bend_ratio_q20;
+            assign bend_phase_increment = PHASE_W'(32'(product >> 20));
+        end else begin : gen_local_bend
+            pitch_bend_lut u_bend (
+                .in_phase_increment(mid_out_increment),
+                .pitch_bend(pitch_bend),
+                .phase_increment(bend_phase_increment)
+            );
+        end
+    endgenerate
 
-    assign vibrato_product = bend_phase_increment * vibrato_ratio_q20;
-    assign phase_increment = PHASE_W'(vibrato_product >> 20);
+    // 两级相位增量流水线：滑音结果 -> 颤音乘法结果 -> DDS。
+    // 采样使能、波形选择和包络同步延迟两拍，保证属于同一个采样请求。
+    logic [PHASE_W-1:0] bend_increment_reg;
+    logic [20:0] vibrato_ratio_reg;
+    logic [1:0] sample_ce_pipe;
+    logic [1:0] waveform_pipe_0, waveform_pipe_1;
+    logic [15:0] envelope_pipe_0, envelope_pipe_1;
+    assign vibrato_product = bend_increment_reg * vibrato_ratio_reg;
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n) begin
+            bend_increment_reg <= '0;
+            vibrato_ratio_reg <= 21'd1048576;
+            phase_increment <= '0;
+            sample_ce_pipe <= '0;
+            waveform_pipe_0 <= '0;
+            waveform_pipe_1 <= '0;
+            envelope_pipe_0 <= '0;
+            envelope_pipe_1 <= '0;
+        end else begin
+            bend_increment_reg <= bend_phase_increment;
+            vibrato_ratio_reg <= vibrato_ratio_q20;
+            phase_increment <= PHASE_W'(vibrato_product >> 20);
+            sample_ce_pipe <= {sample_ce_pipe[0], audio_ce};
+            waveform_pipe_0 <= waveform_sel;
+            waveform_pipe_1 <= waveform_pipe_0;
+            envelope_pipe_0 <= envelope_value;
+            envelope_pipe_1 <= envelope_pipe_0;
+        end
+    end
 
     dds_oscillator # (
         .PHASE_W (PHASE_W),
@@ -63,11 +102,11 @@ module voice #(
     ) DUT1 (
         .sys_clk (sys_clk),
         .rst_n (rst_n),
-        .audio_ce (audio_ce),
+        .audio_ce (sample_ce_pipe[1]),
         .phase_increment (phase_increment),
-        .waveform_sel (waveform_sel),
+        .waveform_sel (waveform_pipe_1),
         .waveform_sample (waveform_sample),
-        .waveform_valid (sample_valid)
+        .waveform_valid (waveform_valid)
     );
 
     adsr # (
@@ -87,11 +126,58 @@ module voice #(
         .active (active)
     );
 
-    logic signed [SAMPLE_W+16:0] sample_product;
+    logic [15:0] waveform_envelope;
     logic [15:0] saved_envelope;
-
-    assign sample_product = waveform_sample * $signed({1'b0, saved_envelope});
-    assign voice_sample = OUTPUT_W'(sample_product >>> 16);
+    // Split envelope into four unsigned nibbles. Keep all low product bits until
+    // the final >>>16, so negative rounding is identical to the original multiply.
+    localparam integer PART_W = SAMPLE_W + 4;
+    localparam integer PROD_W = SAMPLE_W + 17;
+    // Explicit fabric shift/add: DSPs are already full on the target device.
+    // Do not let four small multiplies take DSPs away from the pitch path.
+    function automatic logic signed [PART_W-1:0] nibble_product(
+        input logic signed [SAMPLE_W-1:0] wave,
+        input logic [3:0] nibble
+    );
+        logic signed [PART_W-1:0] w, a, b, c, d;
+        begin
+            w = PART_W'(wave);
+            a = nibble[0] ? w : '0;
+            b = nibble[1] ? (w <<< 1) : '0;
+            c = nibble[2] ? (w <<< 2) : '0;
+            d = nibble[3] ? (w <<< 3) : '0;
+            nibble_product = (a + b) + (c + d);
+        end
+    endfunction
+    logic signed [PART_W-1:0] partial_q [0:3];
+    logic signed [PROD_W-1:0] low_pair_q, high_pair_q;
+    logic partial_valid, pair_valid;
+    wire signed [PROD_W-1:0] combined_product = low_pair_q + (high_pair_q <<< 8);
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n) begin
+            waveform_envelope <= '0;
+            partial_valid <= 1'b0;
+            pair_valid <= 1'b0;
+            sample_valid <= 1'b0;
+            low_pair_q <= '0;
+            high_pair_q <= '0;
+            voice_sample <= '0;
+            for (integer i=0; i<4; i=i+1) partial_q[i] <= '0;
+        end else begin
+            waveform_envelope <= saved_envelope;
+            partial_valid <= waveform_valid;
+            pair_valid <= partial_valid;
+            sample_valid <= pair_valid;
+            if (waveform_valid) begin
+                for (integer i=0; i<4; i=i+1)
+                    partial_q[i] <= nibble_product(waveform_sample, waveform_envelope[4*i +: 4]);
+            end
+            if (partial_valid) begin
+                low_pair_q <= PROD_W'(partial_q[0]) + (PROD_W'(partial_q[1]) <<< 4);
+                high_pair_q <= PROD_W'(partial_q[2]) + (PROD_W'(partial_q[3]) <<< 4);
+            end
+            if (pair_valid) voice_sample <= OUTPUT_W'(combined_product >>> 16);
+        end
+    end
 
     always_ff @(posedge sys_clk) begin
     if (!rst_n)
@@ -104,8 +190,8 @@ module voice #(
         if (!rst_n) begin
             saved_envelope <= 'd0;
         end
-        else if (audio_ce) begin
-            saved_envelope <= envelope_value;
+        else if (sample_ce_pipe[1]) begin
+            saved_envelope <= envelope_pipe_1;
         end
     end
 endmodule

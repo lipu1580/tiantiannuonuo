@@ -5,7 +5,7 @@ module waveform_rom #(
     parameter integer SAMPLE_W = 16,  // 波形样本位宽
     parameter INIT_FILE = "rtl/audio/sine_1024.hex",
     parameter ORGAN_INIT_FILE = "rtl/audio/organ_1024.hex",
-    parameter PLUCK_INIT_FILE = "rtl/audio/pluck_1024.hex"
+    parameter PLUCK_INIT_FILE = "rtl/audio/pluck_1024.hex" //上板的时候记得改成src/pluck_1024.hex
 )(
     input  logic                          sys_clk,
     input  logic [ADDR_W-1:0]             address, // 时钟沿采样的波表地址

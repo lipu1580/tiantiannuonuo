@@ -1,6 +1,14 @@
+//=============================================================================
+// 文件      : audio_defs.svh
+// 归属      : 三人公共接口定义（成员 1 起草，三人共同维护）
+// 说明      : 统一使用 package，不再使用宏定义。
+//             成员 2 的输入模块通过 import audio_defs_pkg::*; 使用本文件。
+//=============================================================================
 `ifndef AUDIO_DEFS_SVH
 `define AUDIO_DEFS_SVH
 
+/* verilator lint_off DECLFILENAME */
+/* verilator lint_off UNUSEDPARAM */
 package audio_defs_pkg;
     // valid && ready 在 sys_clk 上升沿接受一次事件；阻塞时保持 valid 和字段。
     // NOP 消耗一次握手但不改变声部；ALL_NOTES_OFF 进入 RELEASE。
@@ -13,10 +21,16 @@ package audio_defs_pkg;
 
     typedef enum logic [1:0] {
         WAVE_SINE     = 2'b00, // 正弦波
-        WAVE_ORGAN    = 2'b01, // 管风琴类谐波波表
-        WAVE_PLUCK    = 2'b10, // 拨弦类谐波波表，衰减包络由voice提供
+        WAVE_ORGAN   = 2'b01, // 管风琴类波表
+        WAVE_PLUCK = 2'b10, // 拨弦类波表
         WAVE_RESERVED = 2'b11  // 保留/静音
     } waveform_t;
+
+    // 事件打包位宽：type(2) + note_id(7) + velocity(8)
+    localparam integer EVENT_W = 17;
+
+    // 力度缺失时的默认值
+    localparam logic [7:0] DEFAULT_VELOCITY = 8'd128;
 
     // 仅固定规范第 11 节的扩展地址，基础版暂不暴露配置总线。
     localparam logic [7:0] CFG_MASTER_GAIN   = 8'h00; // 主音量配置地址
@@ -28,5 +42,7 @@ package audio_defs_pkg;
     localparam logic [7:0] CFG_TEST_MODE     = 8'h18; // 测试模式地址
     localparam logic [7:0] CFG_ACTIVE_VOICES = 8'h1C; // 活跃声部只读地址
 endpackage
+/* verilator lint_on UNUSEDPARAM */
+/* verilator lint_on DECLFILENAME */
 
-`endif
+`endif // AUDIO_DEFS_SVH

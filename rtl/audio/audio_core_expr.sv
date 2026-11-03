@@ -1,6 +1,6 @@
 `timescale 1ns/1ns
 
-// 扩展音频核心：干声通路及普通配置寄存器；颤音与效果控制待接入。
+// 扩展音频核心：颤音、配置快照及效果控制；FX 当前仅实现组合干声通路。
 // 协议见根目录《成员1_扩展音频接口协议.md》。旧 audio_core 接口保持不变。
 module audio_core_expr #(
     parameter integer VOICE_COUNT = 4,             // 复音声部数量
@@ -58,12 +58,14 @@ module audio_core_expr #(
     output logic [$clog2(VOICE_COUNT+1)-1:0] active_voice_count,
     output logic [VOICE_COUNT-1:0]           voice_active
 );
-    localparam int  TRILL_DEP_ADDR = 'h24,
-                    TRILL_FREQ_ADDR = 'h28,
-                    EFF_MODE_ADDR = 'h2C,
-                    WET_RATIO_ADDR = 'h30,
-                    DELAY_SAMPLE_CNT_ADDR = 'h34,
-                    FEBC_RATIO_ADDR = 'h38;
+    localparam logic [7:0] TRILL_DEP_ADDR = 8'h24,
+                           TRILL_FREQ_ADDR = 8'h28,
+                           EFF_MODE_ADDR = 8'h2C,
+                           WET_RATIO_ADDR = 8'h30,
+                           DELAY_SAMPLE_CNT_ADDR = 8'h34,
+                           FEBC_RATIO_ADDR = 8'h38,
+                           FX_CLEAR_ADDR = 8'h3C,
+                           FX_STATUS_ADDR = 8'h44;
 
     logic test_event_valid, routed_event_valid, routed_event_ready, test_event_ready;
     logic [1:0] test_event_type, routed_event_type;
@@ -88,14 +90,65 @@ module audio_core_expr #(
     logic [7:0]                        wet_gain;
     logic [11:0]                       delay_samples;
     logic [7:0]                        feedback_gain;
-    logic [5:0]                        wr_en;
+    logic [6:0]                        wr_en;
     logic                              wr_avaiable;
     logic signed [15:0]                lfo_q15;
+    logic                              fx_clear, fx_clear_done;
+    logic                              fx_busy, fx_initialized, fx_valid;
+    logic [1:0]                        fx_active_mode;
+    logic                              fx_cfg_pending, fx_pending, fx_cfg_changed;
+    logic                              clear_write_request;
+    logic                              fx_clear_queued, fx_clear_unsent;
+    logic                              snapshot_load, snapshot_valid, ctrl_ready, ctrl_hs;
+    logic [31:0]                       snapshot;
+    logic signed [OUTPUT_W-1:0]        fx_sample;
 
     assign mixer_sample_valid = &voice_sample_valid;
-    // 普通配置立即接受；后续仅对尚未完成的清尾音命令增加请求级回压。
-    assign cfg_ready = rst_n;
-    assign wr_avaiable = cfg_ready && cfg_valid && cfg_write;
+    assign fx_cfg_changed = |wr_en[5:2];
+    // queued 表示这条命令已装入某个快照，直到清理完成前不能重复装入。
+    assign fx_clear_unsent = fx_clear && !fx_clear_queued;
+    assign snapshot_load = !snapshot_valid && (fx_cfg_pending || fx_clear_unsent);
+    assign ctrl_hs = snapshot_valid && ctrl_ready;
+    assign clear_write_request = cfg_valid && cfg_write && (cfg_addr == FX_CLEAR_ADDR) && cfg_wdata[0];
+    assign cfg_ready = rst_n && !(clear_write_request && fx_clear);
+    assign wr_avaiable = cfg_valid && cfg_ready && cfg_write;
+    // 已交给 FX 执行的清理由 busy 表示，不再算“尚未提交”。
+    assign fx_pending = fx_cfg_pending || snapshot_valid || fx_clear_unsent;
+
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n)
+            fx_clear_queued <= 1'b0;
+        else if (fx_clear_done)
+            fx_clear_queued <= 1'b0;
+        else if (snapshot_load && fx_clear_unsent)
+            fx_clear_queued <= 1'b1;
+    end
+
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n)
+            fx_cfg_pending <= 1'b0;
+        else if (fx_cfg_changed)
+            fx_cfg_pending <= 1'b1;
+        else if (snapshot_load)
+            fx_cfg_pending <= 1'b0;
+    end // 新写入优先，避免与生成快照同拍时丢失更新。
+
+    always_ff @(posedge sys_clk) begin
+        if (!rst_n) begin
+            snapshot_valid <= 1'b0;
+            snapshot <= 'b0;
+        end else if (snapshot_load) begin
+            snapshot[1:0] <= fx_mode;
+            snapshot[9:2] <= wet_gain;
+            snapshot[21:10] <= delay_samples;
+            snapshot[29:22] <= feedback_gain;
+            snapshot[30] <= fx_clear_unsent;
+            snapshot_valid <= 'b1;
+        end
+        else if (ctrl_hs) begin
+            snapshot_valid <= 'b0;
+        end
+    end
 
     audio_cfg_regs #(
         .FX_DELAY_DEPTH(FX_DELAY_DEPTH /* default 4096 */)
@@ -104,12 +157,14 @@ module audio_core_expr #(
         .rst_n        (rst_n),
         .wr_en        (wr_en),
         .wr_data      (cfg_wdata),
+        .fx_clear_done(fx_clear_done),
         .vibrato_depth(vibrato_depth),
         .vibrato_rate (vibrato_rate),
         .fx_mode      (fx_mode),
         .wet_gain     (wet_gain),
         .delay_samples(delay_samples),
-        .feedback_gain(feedback_gain)
+        .feedback_gain(feedback_gain),
+        .fx_clear     (fx_clear)
     );
 
     audio_test_source #(
@@ -261,6 +316,30 @@ module audio_core_expr #(
         .mixed_valid (mixed_valid)
     );
 
+    audio_fx_chain #(
+        .SAMPLE_W   (OUTPUT_W /* default 24 */),
+        .SAMPLE_RATE(SAMPLE_RATE /* default 48_000 */),
+        .DELAY_DEPTH(FX_DELAY_DEPTH /* default 4096 */)
+     ) audio_fx_chain (
+        .sys_clk           (sys_clk),
+        .rst_n             (rst_n),
+        .in_valid          (mixed_valid),
+        .in_sample         (mixed_sample),
+        .out_valid         (fx_valid),
+        .out_sample        (fx_sample),
+        .ctrl_valid        (snapshot_valid),
+        .ctrl_ready        (ctrl_ready),
+        .ctrl_mode         (snapshot[1:0]),
+        .ctrl_wet_gain     (snapshot[9:2]),
+        .ctrl_delay_samples(snapshot[21:10]),
+        .ctrl_feedback_gain(snapshot[29:22]),
+        .ctrl_clear        (snapshot[30]),
+        .fx_busy           (fx_busy),
+        .fx_initialized    (fx_initialized),
+        .fx_active_mode    (fx_active_mode),
+        .clear_done        (fx_clear_done)
+    );
+
     pcm_stream_adapter #(
         .INPUT_W   (INPUT_W /* default 24 */),
         .SAMPLE_W  (SAMPLE_W /* default 16 */),
@@ -269,8 +348,8 @@ module audio_core_expr #(
      ) pcm_stream_adapter (
         .sys_clk     (sys_clk),
         .rst_n       (rst_n),
-        .sample_valid(mixed_valid),
-        .mixed_sample(mixed_sample),
+        .sample_valid(fx_valid),
+        .mixed_sample(fx_sample),
         .pcm_valid   (pcm_valid),
         .pcm_ready   (pcm_ready),
         .pcm_left    (pcm_left),
@@ -302,6 +381,7 @@ end
             WET_RATIO_ADDR: wr_en[3] = 'b1;
             DELAY_SAMPLE_CNT_ADDR: wr_en[4] = 'b1;
             FEBC_RATIO_ADDR:wr_en[5] = 'b1;
+            FX_CLEAR_ADDR: wr_en[6] = 'b1;
             default: wr_en = 'b0;
            endcase
         end
@@ -316,8 +396,11 @@ end
             WET_RATIO_ADDR: cfg_rdata = {24'b0, wet_gain};
             DELAY_SAMPLE_CNT_ADDR: cfg_rdata = {20'b0, delay_samples};
             FEBC_RATIO_ADDR: cfg_rdata = {24'b0, feedback_gain};
+            FX_CLEAR_ADDR: cfg_rdata = {31'b0, fx_clear};
+            FX_STATUS_ADDR: cfg_rdata = {27'b0, fx_pending, fx_active_mode,
+                                        fx_initialized, fx_busy};
             default: cfg_rdata = 'b0;
         endcase
     end
-    // TODO: 接入颤音参数、效果控制快照、fx_clear 命令和 fx_status 状态。
+    // 延迟、合唱、混响由 audio_fx_chain 实现，输出增加一个 sys_clk 周期。
 endmodule

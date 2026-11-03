@@ -1,6 +1,7 @@
 `timescale 1ns/1ns
 
-// 普通配置总线集成测试；0x3C 命令和 0x44 状态由后续效果控制 TB 验证。
+// 配置总线集成测试，含 0x3C 命令、重复清理回压和 0x44 状态译码。
+// 动态 FX 状态及清理完成竞态由 tb_audio_core_expr_fx 专项验证。
 // 公共端口驱动，不 force DUT；参考模型按协议检查握手前/后的组合读回。
 module core_cfg_test_case #(
     parameter int DEPTH = 4096
@@ -28,6 +29,7 @@ module core_cfg_test_case #(
     audio_core_expr #(.FX_DELAY_DEPTH(DEPTH)) dut (.*);
 
     logic [31:0] expected [0:5];
+    bit expected_clear = 0;
     int checks = 0;
     int writes = 0;
     string phase = "reset";
@@ -65,10 +67,13 @@ module core_cfg_test_case #(
         logic [31:0] want;
         idx = index_of(cfg_addr);
         want = idx < 0 ? 32'd0 : expected[idx];
-        // 效果控制尚未实现，不把两个未来功能地址的当前占位值作为协议。
-        if (cfg_addr != 8'h3C && cfg_addr != 8'h44)
-            check(cfg_rdata === want,
-                  $sformatf("addr=%02h read=%08h expected=%08h", cfg_addr, cfg_rdata, want));
+        if (cfg_addr == 8'h3C) want = {31'd0, expected_clear};
+        if (cfg_addr == 8'h44) begin
+            check(cfg_rdata[31:5] === 27'd0, "status reserved bits must be zero");
+            return;
+        end
+        check(cfg_rdata === want,
+              $sformatf("addr=%02h read=%08h expected=%08h", cfg_addr, cfg_rdata, want));
     endtask
 
     // 连续调用意味着相邻上升沿都有请求，valid 不会被自动拉低。
@@ -78,7 +83,9 @@ module core_cfg_test_case #(
         @(negedge sys_clk);
         cfg_valid = valid; cfg_write = write_req; cfg_addr = addr; cfg_wdata = data;
         #1;
-        check(cfg_ready === rst_n, "ordinary access ready must equal rst_n");
+        check(cfg_ready === (rst_n && !(valid && write_req && addr == 8'h3C &&
+                                        data[0] && expected_clear)),
+              "only an outstanding clear may block another clear command");
         check_read();
         @(posedge sys_clk);
         check_read(); // 上升沿前的已提交值，包括写握手当拍。
@@ -87,6 +94,8 @@ module core_cfg_test_case #(
             expected[idx] = clamp(idx, data);
             writes++;
         end
+        if (rst_n && valid && cfg_ready && write_req && addr == 8'h3C && data[0])
+            expected_clear = 1;
         #1;
         check_read(); // NBA 后必须已更新，无额外一拍延迟。
     endtask
@@ -109,9 +118,11 @@ module core_cfg_test_case #(
         expected[0] = 0; expected[1] = 1280; expected[2] = 0;
         expected[3] = 0; expected[4] = DEPTH-1 < 1920 ? DEPTH-1 : 1920;
         expected[5] = 0;
+        expected_clear = 0;
         check_read();
         @(negedge sys_clk);
         cfg_valid = 0; rst_n = 1;
+        repeat (DEPTH+1) @(negedge sys_clk);
         read_all();
     endtask
 
@@ -120,6 +131,13 @@ module core_cfg_test_case #(
         values = '{0, 1, 3, 4, 100, 101, 128, 129, 255, 256,
                    2048, 2049, 32'h00010000, 32'h80000000, 32'hFFFFFFFF};
         reset_core();
+        phase = "status reset / read-only / clear no-op";
+        cycle(1, 0, 8'h44, 0);
+        check(cfg_rdata == 32'h2, "initialized bypass must be ready after reset");
+        cycle(1, 1, 8'h44, 32'hffffffff);
+        cycle(1, 0, 8'h44, 0);
+        cycle(1, 1, 8'h3C, 32'hfffffffe);
+        cycle(1, 0, 8'h3C, 0);
         phase = "all registers / full unsigned clamp / isolation";
         for (int i = 0; i < 6; i++) begin
             foreach (values[j]) begin
@@ -203,8 +221,25 @@ module core_cfg_test_case #(
         read_all();
         check(pcm_valid, "config access unexpectedly cleared PCM FIFO");
 
-        phase = "reset after writes with pending request";
+        phase = "clear command / normal accesses remain ready / repeated clear stalls";
+        cycle(0, 1, 8'h3C, 1); // valid=0 不能发起命令。
+        cycle(1, 0, 8'h3C, 1); // 读请求不能发起命令。
+        cycle(1, 1, 8'h3D, 1); // 非对齐地址不能发起命令。
+        cycle(1, 1, 8'h3C, 32'h80000001);
+        cycle(1, 0, 8'h3C, 0);
+        cycle(1, 0, 8'h44, 0);
+        cycle(1, 1, 8'h3C, 32'hfffffffe); // 写 bit0=0 不阻塞、不取消命令。
+        cycle(1, 1, 8'h30, 96);
+        cycle(1, 1, 8'h44, 32'hffffffff); // 状态写入忽略。
+        cycle(1, 1, 8'h40, 32'hffffffff); // 保留地址仍正常握手。
+        read_all();
+        cycle(1, 0, 8'h3C, 0);
+        // 第二条命令保持请求字段，连续等待；随后用复位撤销请求。
+        repeat (3) cycle(1, 1, 8'h3C, 1);
+        phase = "reset after writes with blocked clear request";
         reset_core();
+        cycle(1, 0, 8'h3C, 0);
+        cycle(1, 0, 8'h44, 0);
         $display("PASS core ordinary cfg DEPTH=%0d checks=%0d writes=%0d", DEPTH, checks, writes);
         done = 1;
     end
@@ -216,7 +251,7 @@ module tb_audio_core_expr_cfg;
     core_cfg_test_case #(.DEPTH(1024)) small_depth (.done(done[1]));
     initial begin
         wait (&done);
-        $display("PASS tb_audio_core_expr_cfg (ordinary parameters only; fx_clear/status deferred)");
+        $display("PASS tb_audio_core_expr_cfg: ordinary parameters, clear decode/backpressure, status read-only");
         $finish;
     end
     initial begin

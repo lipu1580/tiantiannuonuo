@@ -63,6 +63,7 @@ VTB := \
 	tb_voice_manager \
 	tb_audio_cfg_regs \
 	tb_audio_core_expr_cfg \
+	tb_audio_core_expr_audio \
 	tb_vibrato_luts
 
 .PHONY: all lint lint-audio lint-top lint-all sim sim-audio sim-v sim-all clean help

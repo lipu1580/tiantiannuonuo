@@ -45,13 +45,15 @@ module tang_nano20k_top #(
     wire [1:0] waveform_sel;
 
     // Member 2 -> member 1: cfg 配置总线（效果/颤音参数）。
-    // audio_core_expr 尚未合入，这里先把 cfg_ready 常量置 1：
-    // 按键序列会瞬间写完、无副作用，接入后直接换成 audio_core_expr 的端口即可。
+    // 已接 audio_core_expr：普通参数写入其内部的 audio_cfg_regs。
+    // 目前 fx_* 寄存器只存不用（audio_fx_chain 尚未实现），所以效果键
+    // 会正确写入、但暂时听不出变化；颤音/波形/滑音均已生效。
     wire        cfg_valid;
     wire        cfg_write;
     wire [7:0]  cfg_addr;
     wire [31:0] cfg_wdata;
-    wire        cfg_ready = 1'b1;
+    wire        cfg_ready;
+    wire [31:0] cfg_rdata;
 
     // Member 1 -> member 3: signed 16-bit stereo PCM.
     // ready flows BACK from audio_out_top to audio_core.
@@ -94,7 +96,7 @@ module tang_nano20k_top #(
         .cfg_addr(cfg_addr),
         .cfg_wdata(cfg_wdata),
         .cfg_ready(cfg_ready),
-        .cfg_rdata(32'd0),
+        .cfg_rdata(cfg_rdata),
         .test_mode(TEST_SOURCE == 1),
         .test_pattern(TEST_PATTERN),
         .adc_bus_error(adc_bus_error),
@@ -103,7 +105,8 @@ module tang_nano20k_top #(
         .key_down(), .fsr_raw(), .fsr_filtered(), .input_state(),
         .adc_busy(), .adc_valid(), .adc_timeout_debug(),
         .piezo_peak_rst(), .piezo_hit_debug(),
-        .piezo_active_debug(), .base_note_debug()
+        .piezo_active_debug(), .base_note_debug(),
+        .key_ghost_debug(), .key_conflict_debug()
     );
 
     // audio_ce is a one-cycle ENABLE, not a separate clock.
@@ -116,11 +119,14 @@ module tang_nano20k_top #(
         .audio_ce(audio_ce)
     );
 
-    audio_core #(
+    // 第 2 轮：例化扩展核心（基础核心 + 滑音 + 颤音 + cfg 寄存器组）。
+    // 旧 audio_core 仍保留在 rtl/audio/ 里，便于回退，但板级不再使用。
+    audio_core_expr #(
         .VOICE_COUNT(VOICE_COUNT),
         .NOTE_W(7),
         .SAMPLE_W(16),
-        .SAMPLE_RATE(SAMPLE_RATE)
+        .SAMPLE_RATE(SAMPLE_RATE),
+        .FX_DELAY_DEPTH(4096)
     ) u_audio_core (
         .sys_clk(sys_clk),
         .rst_n(sys_rst_n),
@@ -135,6 +141,13 @@ module tang_nano20k_top #(
         .expression(TEST_SOURCE == 0 ? expression : 8'd255),
         .pitch_bend(TEST_SOURCE == 0 ? pitch_bend : 12'd2048),
         .waveform_sel(TEST_SOURCE == 0 ? waveform_sel : 2'b00),
+        // cfg 总线：来自 input_top 的 cfg_master
+        .cfg_valid(cfg_valid),
+        .cfg_ready(cfg_ready),
+        .cfg_write(cfg_write),
+        .cfg_addr(cfg_addr),
+        .cfg_wdata(cfg_wdata),
+        .cfg_rdata(cfg_rdata),
         .pcm_valid(pcm_valid),
         .pcm_ready(pcm_ready),
         .pcm_left(pcm_left),

@@ -18,6 +18,15 @@ module tb_voice #(
     logic [7:0] expression = 255;
     logic [11:0] pitch_bend = 2048;
     logic [1:0] waveform_sel = 0;
+    logic [20:0] vibrato_ratio_q20;
+    logic [20:0] manual_ratio_q20 = 21'd1048576;
+    logic use_lfo = 0;
+    logic [7:0] vibrato_depth = 0;
+    logic [31:0] vibrato_rate = 1280;
+    logic signed [15:0] lfo_q15;
+    logic signed [24:0] depth_product;
+    logic signed [17:0] vibrato_cents_q8;
+    logic [20:0] lfo_ratio_q20;
     logic signed [23:0] voice_sample;
     logic sample_valid;
     logic active;
@@ -31,7 +40,11 @@ module tb_voice #(
     integer valid_errors = 0;
     integer positive_samples = 0;
     integer negative_samples = 0;
+    integer phase_checks = 0;
+    integer phase_errors = 0;
     logic signed [15:0] sine_table [0:1023];
+    logic signed [15:0] organ_table [0:1023];
+    logic signed [15:0] pluck_table [0:1023];
 
     // 独立维护音符和相位，不读取 DUT 的内部信号。
     // 使用 MIDI 0、A4/A5，直接写出按 48 kHz、32 位相位算出的常量，
@@ -48,6 +61,18 @@ module tb_voice #(
         .SUSTAIN_LEVEL(16'(SUSTAIN_LEVEL)),
         .RELEASE_STEP(16'd17000)
     ) DUT (.*);
+
+    // 真实颤音链路作为输入激励。voice 只接收比例，深度平滑属于核心测试。
+    vibrato_lfo #(.SAMPLE_RATE(48000)) u_lfo (
+        .sys_clk(sys_clk), .rst_n(rst_n), .audio_ce(audio_ce),
+        .vibrato_rate(vibrato_rate), .lfo_q15(lfo_q15)
+    );
+    assign depth_product = lfo_q15 * $signed({1'b0, vibrato_depth});
+    assign vibrato_cents_q8 = 18'(depth_product >>> 7);
+    pitch_ratio_lut u_vibrato_ratio (
+        .cents_q8(vibrato_cents_q8), .ratio_q20(lfo_ratio_q20)
+    );
+    assign vibrato_ratio_q20 = use_lfo ? lfo_ratio_q20 : manual_ratio_q20;
 
     always #(CLK_PERIOD / 2) sys_clk = ~sys_clk;
 
@@ -70,6 +95,38 @@ module tb_voice #(
         $display("%s", name);
     endtask
 
+    function automatic logic [20:0] ratio_for_cents(input int cents);
+        return 21'($rtoi(1048576.0 * (2.0 ** (real'(cents) / 1200.0)) + 0.5));
+    endfunction
+
+    // 以公式独立计算滑音系数；每一级乘法后分别截断，与两级音高路径对应。
+    // 不实例化第二个被测滑音 LUT 作为参考，也不读取 DUT 的中间步长。
+    function automatic logic [31:0] reference_increment(
+        input logic [6:0] note,
+        input logic [11:0] bend,
+        input logic [20:0] vibrato_ratio
+    );
+        longint unsigned base_increment;
+        longint unsigned bend_coefficient;
+        longint unsigned bent_increment;
+        longint unsigned final_increment;
+        real cents;
+        case (note)
+            0: base_increment = 64'd731558;
+            69: base_increment = 64'd39370534;
+            81: base_increment = 64'd78741067;
+            default: $fatal(1, "reference model received unsupported note");
+        endcase
+        if (bend <= 2048)
+            cents = 200.0 * real'(int'(bend) - 2048) / 2048.0;
+        else
+            cents = 200.0 * real'(int'(bend) - 2048) / 2047.0;
+        bend_coefficient = 64'($rtoi(1048576.0 * (2.0 ** (cents / 1200.0)) + 0.5));
+        bent_increment = (base_increment * bend_coefficient) >> 20;
+        final_increment = (bent_increment * 64'(vibrato_ratio)) >> 20;
+        return 32'(final_increment);
+    endfunction
+
     // 请求沿之后更新相位；下一拍检查同步 ROM 返回的新相位样本。
     // 常规用例在请求至返回期间保持控制量稳定。
     // 包络采用更新前还是更新后的值，由上面的参数明确指定。
@@ -86,12 +143,7 @@ module tb_voice #(
         note_on = on_cmd;
         note_off = off_cmd;
         requested_wave = waveform_sel;
-        case (saved_note)
-            0: increment = 32'd731558;
-            69: increment = 32'd39370534;
-            81: increment = 32'd78741067;
-            default: $fatal(1, "reference model received unsupported note");
-        endcase
+        increment = reference_increment(saved_note, pitch_bend, vibrato_ratio_q20);
         @(posedge sys_clk);
         request_envelope = envelope_value; // NBA 更新前取值，与 saved_envelope 对应
         #1;
@@ -119,11 +171,21 @@ module tb_voice #(
             end
             if (ce) begin
                 ref_phase = ref_phase + increment;
-                raw_sample = (requested_wave == 0)
-                           ? 64'($signed(sine_table[ref_phase[31:22]])) : 64'sd0;
+                case (requested_wave)
+                    0: raw_sample = 64'($signed(sine_table[ref_phase[31:22]]));
+                    1: raw_sample = 64'($signed(organ_table[ref_phase[31:22]]));
+                    2: raw_sample = 64'($signed(pluck_table[ref_phase[31:22]]));
+                    default: raw_sample = 0;
+                endcase
                 product = raw_sample * $signed({1'b0, request_envelope});
                 expected_sample = 24'(product >>> 16);
             end
+            // 包括 CE=0 的保持、两级乘法的截断、相位回绕和换音时的连续性。
+            phase_checks++;
+            if (DUT.DUT1.phase_accumulator !== ref_phase) phase_errors++;
+            check(DUT.DUT1.phase_accumulator === ref_phase,
+                  $sformatf("DDS phase mismatch: expected %0d got %0d",
+                            ref_phase, DUT.DUT1.phase_accumulator));
             pending = ce;
             if (on_cmd) saved_note = note_id;
         end
@@ -135,6 +197,11 @@ module tb_voice #(
         velocity = 255;
         expression = 255;
         waveform_sel = 0;
+        pitch_bend = 2048;
+        manual_ratio_q20 = 21'd1048576;
+        use_lfo = 0;
+        vibrato_depth = 0;
+        vibrato_rate = 1280;
         repeat (2) cycle(0, 0, 0);
         rst_n = 1;
         cycle(0, 0, 0);
@@ -163,8 +230,13 @@ module tb_voice #(
                         expected_envelope));
     endtask
 
-    initial begin
+    initial begin : tests
+        int positive_modulation;
+        int negative_modulation;
+        logic [31:0] held_phase;
         $readmemh("rtl/audio/sine_1024.hex", sine_table);
+        $readmemh("rtl/audio/organ_1024.hex", organ_table);
+        $readmemh("rtl/audio/pluck_1024.hex", pluck_table);
         if ($test$plusargs("waves")) begin
             $dumpfile("/tmp/tb_voice.vcd");
             $dumpvars(0, tb_voice);
@@ -257,18 +329,117 @@ module tb_voice #(
         repeat (4) sample_step();
         check(active === 1'b0, "reset must discard pending NOTE_ON");
 
+        begin_case("CASE 12: organ / pluck / mute sample arithmetic");
+        reset_dut();
+        start_note(69, 255);
+        repeat (15) sample_step();
+        for (int wave_id = 0; wave_id < 4; wave_id++) begin
+            waveform_sel = 2'(wave_id);
+            repeat (120) sample_step();
+        end
+
+        begin_case("CASE 13: unity vibrato preserves all 4096 original bend values");
+        reset_dut();
+        start_note(69, 255);
+        repeat (15) sample_step();
+        for (int bend = 0; bend < 4096; bend++) begin
+            pitch_bend = 12'(bend);
+            sample_step();
+        end
+
+        begin_case("CASE 14: manual +/-100-cent vibrato at both bend endpoints, A4/A5");
+        for (int note_index = 0; note_index < 2; note_index++) begin
+            start_note(note_index == 0 ? 7'd69 : 7'd81, 255);
+            repeat (15) sample_step();
+            for (int bend_index = 0; bend_index < 3; bend_index++) begin
+                case (bend_index)
+                    0: pitch_bend = 12'd0;
+                    1: pitch_bend = 12'd2048;
+                    2: pitch_bend = 12'd4095;
+                endcase
+                for (int cents = -100; cents <= 100; cents += 25) begin
+                    manual_ratio_q20 = ratio_for_cents(cents);
+                    repeat (32) sample_step();
+                end
+            end
+        end
+
+        begin_case("CASE 15: real LFO + ratio LUT, dynamic depth/rate with bend");
+        reset_dut();
+        start_note(69, 255);
+        repeat (15) sample_step();
+        use_lfo = 1;
+        vibrato_depth = 100;
+        positive_modulation = 0;
+        negative_modulation = 0;
+        for (int bend_index = 0; bend_index < 2; bend_index++) begin
+            pitch_bend = bend_index == 0 ? 12'd0 : 12'd4095;
+            repeat (10000) begin
+                sample_step();
+                if (vibrato_ratio_q20 > 21'd1048576) positive_modulation++;
+                if (vibrato_ratio_q20 < 21'd1048576) negative_modulation++;
+                check(active === 1'b1, "vibrato must not release the note");
+            end
+        end
+        check(positive_modulation > 0 && negative_modulation > 0,
+              "real LFO stimulus must modulate above and below the bent pitch");
+        for (int rate_index = 0; rate_index < 4; rate_index++) begin
+            case (rate_index)
+                0: vibrato_rate = 256;
+                1: vibrato_rate = 1408;
+                2: vibrato_rate = 2048;
+                3: vibrato_rate = 1280;
+            endcase
+            vibrato_depth = 8'(25 * rate_index);
+            repeat (257) sample_step();
+        end
+        // 深度为零时，来自真实链路的倍率也必须精确等于 1。
+        vibrato_depth = 0;
+        repeat (64) begin
+            sample_step();
+            check(vibrato_ratio_q20 === 21'd1048576,
+                  "zero vibrato depth must produce exact unity");
+        end
+
+        begin_case("CASE 16: CE=0 control changes hold phase; continuous modulated requests");
+        held_phase = ref_phase;
+        for (int i = 0; i < 32; i++) begin
+            pitch_bend = 12'(i * 127);
+            vibrato_depth = 8'(i * 3);
+            vibrato_rate = 32'(256 + i * 50);
+            cycle(0, 0, 0);
+            check(DUT.DUT1.phase_accumulator === held_phase,
+                  "changing pitch controls without CE must not advance phase");
+        end
+        repeat (512) cycle(1, 0, 0);
+        repeat (3) cycle(0, 0, 0);
+        for (int wave_id = 0; wave_id < 4; wave_id++) begin
+            waveform_sel = 2'(wave_id);
+            repeat (120) sample_step();
+        end
+
+        begin_case("CASE 17: NOTE_OFF and reset while vibrato is running");
+        cycle(0, 0, 1);
+        repeat (12) sample_step();
+        check(active === 1'b0 && envelope_value === 0,
+              "vibrato must not prevent release from finishing");
+        repeat (3) sample_step();
+        cycle(1, 0, 0);
+        reset_dut();
+        repeat (4) sample_step();
+
         check(positive_samples > 0 && negative_samples > 0,
               "stimulus must cover both positive and negative reference samples");
         $display("RESULT %s: failures=%0d", case_name, errors - case_errors);
-        $display("VOICE checks=%0d failures=%0d sample_errors=%0d valid_errors=%0d",
-                 checks, errors, sample_errors, valid_errors);
+        $display("VOICE checks=%0d failures=%0d sample_errors=%0d valid_errors=%0d phase_checks=%0d phase_errors=%0d",
+                 checks, errors, sample_errors, valid_errors, phase_checks, phase_errors);
         if (errors != 0) $fatal(1, "tb_voice failed; see FAIL messages");
         $display("PASS: tb_voice");
         $finish;
     end
 
     initial begin
-        #100000;
+        #20_000_000;
         $fatal(1, "TIMEOUT: tb_voice did not finish");
     end
 endmodule

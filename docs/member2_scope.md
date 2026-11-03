@@ -1,9 +1,16 @@
 # 成员 2 职责与交付范围（最终方案版）
 
-版本：2.2  
-日期：2026-10-29  
-适用方案：4×4 矩阵选音区/音色，5 片 FSR402 做触发与力度，1 片 FSR402 做持续表情，
-电位器做滑音，ADS7830 做模拟采集，成员 1 的 `audio_core` 做合成，成员 3 做 I2S/功放/板级。
+版本：3.0（第 2 轮）
+日期：2026-11-02  
+适用方案：4×4 矩阵选根音/波形/效果，5 片 FSR402 做触发与力度，
+1 片 FSR402 做持续表情，电位器做滑音，ADS7830 做模拟采集，
+成员 1 的 `audio_core_expr` 做合成与效果，成员 3 做 I2S/功放/板级。
+
+> **第 2 轮变化摘要**（详见 `docs/member2_round2_taskbook.md`）
+> - 键位重排：9 根音 + 3 波形 + 3 效果 + K15 复用键
+> - 键盘**不再产生任何音符事件**，`MATRIX_MODE` 已删除
+> - 取消八度、取消 `ALL_NOTES_OFF` 按键
+> - 新增 `key_tap_hold.sv`（短/长按）与 `cfg_master.sv`（cfg 总线主控）
 
 ---
 
@@ -183,8 +190,10 @@ note_id = clamp(base_note + TRIG_OFFSET[fsr_index], 0, 127)
 |---|---|---|
 | `key_scan.sv` | 已完成 | 保持 |
 | `key_debounce.sv` | 已完成 | 保持 |
-| `note_map.sv` | 已完成 | 保留键位映射；MATRIX_MODE=1 时由译码器用键号选根音 |
-| `key_event_decoder.sv` | 已完成 | 支持 `MATRIX_MODE=0/1`，输出 `base_note` |
+| `note_map.sv` | ✅ 第 2 轮重写 | 16 键新映射：根音/波形/效果/复用键 |
+| `key_tap_hold.sv` | ✅ 第 2 轮新增 | K15 短按(合唱)/长按(颤音)判决，600 ms 互斥 |
+| `cfg_master.sv` | ✅ 第 2 轮新增 | 4 段效果写序列 + 颤音档位循环 + 不抢占排队 |
+| `key_event_decoder.sv` | ✅ 第 2 轮重写 | 只输出根音/波形/`fx_req`，**不发事件**、无八度 |
 | `event_queue.sv` | 已完成 | 保持，供 NOTE_ON/OFF/ALL_OFF 使用 |
 | `adc_ads7830.sv` | 已完成 | 保持 I2C 驱动；7 通道调度在 `input_top` |
 | `input_top.sv` ADC 调度 | 已完成 | 7 通道轮询，触发通道优先 |
@@ -192,7 +201,7 @@ note_id = clamp(base_note + TRIG_OFFSET[fsr_index], 0, 127)
 | `fsr_filter.sv` | 已完成 | 可增加零点/满量程校准（P1） |
 | `expression_mapper.sv` | 已完成 | 可增加中心死区、`EXPR_MIN`（P1） |
 | `input_event_stub.sv` | 已完成 | 可增加触发测试序列（P1） |
-| `input_top.sv` 顶层 | 已完成 | 已接入 7 通道、fsr_trigger、事件仲裁 |
+| `input_top.sv` 顶层 | ✅ 第 2 轮改造 | 接入 7 通道、`fsr_trigger`、`key_tap_hold`、`cfg_master`，新增 6 根 cfg 端口 |
 
 ### 6.1 顶层端口
 
@@ -249,7 +258,7 @@ output logic [4:0] piezo_peak_rst;   // 恒为 0，可不连接
 
 | 最终方案要求 | 实现位置 | 状态 |
 |---|---|---|
-| 矩阵 K0~K11 只更新根音，不发 NOTE_ON | `key_event_decoder.sv` `MATRIX_MODE=1` | ✅ |
+| 9 个根音键只更新根音，不发 NOTE_ON | `key_event_decoder.sv` | ✅ |
 | 5 路 FSR 电平 -> NOTE_ON + velocity | `fsr_trigger.sv` | ✅ |
 | 松开（电平持续低于阈值）-> NOTE_OFF | `fsr_trigger.sv` `TRIGGER_RELEASE_SAMPLES` | ✅ |
 | 无样本时兜底 NOTE_OFF | `fsr_trigger.sv` `TRIGGER_NOTE_OFF_MS` | ✅ |
@@ -259,12 +268,9 @@ output logic [4:0] piezo_peak_rst;   // 恒为 0，可不连接
 | 5 路 10 kΩ 分压 | 硬件制作 | ⬜ |
 | 顶层 + `.cst` + 上板测试 | 成员 3 | ⬜ |
 
-`MATRIX_MODE` 参数保留两种工作方式：
-
-- `MATRIX_MODE=0`：矩阵当键盘的测试模式（默认，兼容旧 testbench）；
-- `MATRIX_MODE=1`：矩阵选音区、FSR 触发的正式演奏模式。
-
-这样不会破坏已经通过的 testbench，也方便上板对比。
+`MATRIX_MODE` 参数**已在第 2 轮删除**：键盘不再发声，只剩一种演奏模式
+（矩阵选根音/波形/效果，FSR 触发发声）。原 `MATRIX_MODE=0` 的「键盘当钢琴」
+测试能力由 `test_mode`（`input_event_stub` 固定事件源）覆盖。
 
 ---
 

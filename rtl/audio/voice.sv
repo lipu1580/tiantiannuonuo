@@ -23,6 +23,7 @@ module voice #(
     input  logic [7:0]                   expression, // 持续音量/力度
     input  logic [11:0]                  pitch_bend, // 滑音值，2048 为中心
     input  logic [1:0]                   waveform_sel, // 振荡器波形选择
+    input  logic [20:0]                  vibrato_ratio_q20,
 
     output logic signed [OUTPUT_W-1:0]   voice_sample, // 当前声部有符号样本
     output logic                         sample_valid, // 当前声部样本有效
@@ -31,7 +32,10 @@ module voice #(
 );
     logic signed [PHASE_W-1:0] waveform_sample;
     logic [PHASE_W-1:0] phase_increment;
+    logic [PHASE_W-1:0] mid_out_increment;
     logic [NOTE_W-1:0] lock_note_id;
+    logic [PHASE_W-1:0] bend_phase_increment;
+    logic [PHASE_W+20:0] vibrato_product;
 
     note_freq_lut # (
         .NOTE_W (NOTE_W),
@@ -40,8 +44,17 @@ module voice #(
     ) DUT0 (
         .note_id (lock_note_id),
         .pitch_bend (pitch_bend),
-        .phase_increment (phase_increment)
+        .phase_increment (mid_out_increment)
     );
+
+    pitch_bend_lut pitch_bend_lut (
+        .in_phase_increment(mid_out_increment),
+        .pitch_bend        (pitch_bend),
+        .phase_increment   (bend_phase_increment)
+    );
+
+    assign vibrato_product = bend_phase_increment * vibrato_ratio_q20;
+    assign phase_increment = PHASE_W'(vibrato_product >> 20);
 
     dds_oscillator # (
         .PHASE_W (PHASE_W),

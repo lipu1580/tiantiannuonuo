@@ -1,5 +1,6 @@
 # 仿真输出
 build/
+*.o
 *.vcd
 *.fst
 *.vvp

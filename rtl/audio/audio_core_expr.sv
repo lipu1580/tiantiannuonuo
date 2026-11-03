@@ -1,6 +1,6 @@
 `timescale 1ns/1ns
 
-// 扩展音频核心接口草案：仅声明 parameter 和端口，尚未实现功能。
+// 扩展音频核心：干声通路及普通配置寄存器；颤音与效果控制待接入。
 // 协议见根目录《成员1_扩展音频接口协议.md》。旧 audio_core 接口保持不变。
 module audio_core_expr #(
     parameter integer VOICE_COUNT = 4,             // 复音声部数量
@@ -74,7 +74,7 @@ module audio_core_expr #(
     logic [VOICE_COUNT-1:0]            voice_release;
     logic [NOTE_W-1:0]                 voice_note_id [0:VOICE_COUNT-1];
     logic [7:0]                        voice_velocity [0:VOICE_COUNT-1];
-    logic signed [OUTPUT_W-1:0]                voice_sample [0:VOICE_COUNT-1];
+    logic signed [OUTPUT_W-1:0]        voice_sample [0:VOICE_COUNT-1];
     logic [VOICE_COUNT-1:0]            voice_sample_valid;
     logic                              mixer_sample_valid;
     logic signed [OUTPUT_W-1:0]        mixed_sample;
@@ -82,8 +82,35 @@ module audio_core_expr #(
     logic [7:0]                        expression_reg;
     logic [11:0]                       pitch_bend_reg;
     logic [1:0]                        waveform_sel_reg;
+    logic [7:0]                        vibrato_depth;
+    logic [15:0]                       vibrato_rate;
+    logic [1:0]                        fx_mode;
+    logic [7:0]                        wet_gain;
+    logic [11:0]                       delay_samples;
+    logic [7:0]                        feedback_gain;
+    logic [5:0]                        wr_en;
+    logic                              wr_avaiable;
+    logic signed [15:0]                lfo_q15;
 
     assign mixer_sample_valid = &voice_sample_valid;
+    // 普通配置立即接受；后续仅对尚未完成的清尾音命令增加请求级回压。
+    assign cfg_ready = rst_n;
+    assign wr_avaiable = cfg_ready && cfg_valid && cfg_write;
+
+    audio_cfg_regs #(
+        .FX_DELAY_DEPTH(FX_DELAY_DEPTH /* default 4096 */)
+     ) audio_cfg_regs (
+        .sys_clk      (sys_clk),
+        .rst_n        (rst_n),
+        .wr_en        (wr_en),
+        .wr_data      (cfg_wdata),
+        .vibrato_depth(vibrato_depth),
+        .vibrato_rate (vibrato_rate),
+        .fx_mode      (fx_mode),
+        .wet_gain     (wet_gain),
+        .delay_samples(delay_samples),
+        .feedback_gain(feedback_gain)
+    );
 
     audio_test_source #(
         .NOTE_W     (NOTE_W /* default 7 */),
@@ -144,6 +171,46 @@ module audio_core_expr #(
         .active_voice_count(active_voice_count)
     );
 
+    vibrato_lfo #(
+        .SAMPLE_RATE(SAMPLE_RATE /* default 48_000 */)
+     ) vibrato_lfo (
+        .vibrato_rate({16'b0, vibrato_rate}),
+        .sys_clk     (sys_clk),
+        .rst_n       (rst_n),
+        .audio_ce    (audio_ce),
+        .lfo_q15     (lfo_q15)
+    );
+
+    logic [7:0]             depth_active;
+
+    always_ff @(posedge sys_clk) begin
+         if (!rst_n) begin
+            depth_active <= 'b0;
+         end
+         else if (audio_ce) begin
+            if (depth_active < vibrato_depth)
+            depth_active <= depth_active + 8'd1;
+        else if (depth_active > vibrato_depth)
+            depth_active <= depth_active - 8'd1;
+         end
+    end
+
+    logic signed [24:0] depth_product;
+    logic signed [17:0] vibrato_cents_q8;
+    logic [20:0] vibrato_ratio_q20;
+
+    // Q1.15 波形 × 整数音分。
+    // 深度补一个 0，保证转换为有符号数后仍是正数。
+    assign depth_product = lfo_q15 * $signed({1'b0, depth_active});
+
+    // 原乘积带 15 位小数，右移 7 位后保留 8 位小数。
+    assign vibrato_cents_q8 = 18'(depth_product >>> 7);
+
+    pitch_ratio_lut u_vibrato_ratio (
+        .cents_q8  (vibrato_cents_q8),
+        .ratio_q20 (vibrato_ratio_q20)
+    );
+
     generate
     for (genvar i = 0; i < VOICE_COUNT; i++) begin : gen_voice
         voice #(
@@ -169,6 +236,7 @@ module audio_core_expr #(
             .expression     (expression_reg),
             .pitch_bend     (pitch_bend_reg),
             .waveform_sel   (waveform_sel_reg),
+            .vibrato_ratio_q20 (vibrato_ratio_q20),
 
             .voice_sample   (voice_sample[i]),
             .sample_valid   (voice_sample_valid[i]),
@@ -223,5 +291,33 @@ module audio_core_expr #(
     end
 end
 
-    // 仅接口骨架：输出尚无驱动，不可作为可播放的核心使用。
+
+    always_comb begin
+        wr_en = 'b0;
+        if (wr_avaiable) begin
+           case (cfg_addr)
+            TRILL_DEP_ADDR: wr_en[0] = 'b1;
+            TRILL_FREQ_ADDR: wr_en[1] = 'b1;
+            EFF_MODE_ADDR: wr_en[2] = 'b1;
+            WET_RATIO_ADDR: wr_en[3] = 'b1;
+            DELAY_SAMPLE_CNT_ADDR: wr_en[4] = 'b1;
+            FEBC_RATIO_ADDR:wr_en[5] = 'b1;
+            default: wr_en = 'b0;
+           endcase
+        end
+    end
+
+    always_comb begin
+        cfg_rdata = 'b0;
+        case (cfg_addr)
+            TRILL_DEP_ADDR: cfg_rdata = {24'b0, vibrato_depth};
+            TRILL_FREQ_ADDR: cfg_rdata = {16'b0, vibrato_rate};
+            EFF_MODE_ADDR: cfg_rdata = {30'b0, fx_mode};
+            WET_RATIO_ADDR: cfg_rdata = {24'b0, wet_gain};
+            DELAY_SAMPLE_CNT_ADDR: cfg_rdata = {20'b0, delay_samples};
+            FEBC_RATIO_ADDR: cfg_rdata = {24'b0, feedback_gain};
+            default: cfg_rdata = 'b0;
+        endcase
+    end
+    // TODO: 接入颤音参数、效果控制快照、fx_clear 命令和 fx_status 状态。
 endmodule
